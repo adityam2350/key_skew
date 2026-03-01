@@ -1,0 +1,35 @@
+# Log files
+*.log
+**/*.log
+
+# Run directories
+runs/
+runs/**
+
+# Build artifacts
+bin/
+bin/**
+
+# Compiled binaries in root directory
+/master
+/mapper
+/reducer
+/merge_unsalt
+/make_zipf
+/make_catastrophe
+
+# Data files (optional - uncomment if you don't want to track generated datasets)
+# data/
+# data/**
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
