@@ -18,6 +18,30 @@ A clean, modular Go implementation of a local MapReduce MVP that simulates a dis
 
 ## Architecture
 
+The codebase is organized into three main directories:
+
+- **`common/`**: Shared code used by both WordCount and PageRank jobs
+  - `cmd/master/`: Master dispatcher and shared utilities
+  - `cmd/mapper/`: Mapper worker (job-agnostic)
+  - `cmd/reducer/`: Reducer worker (job-agnostic)
+  - `internal/common/`: Shared utilities (types, hashing, I/O, logging, metrics)
+  - `internal/jobs/`: Job interface and registry
+  - `internal/master/`: Shared master utilities
+
+- **`wordcount/`**: WordCount-specific code
+  - `cmd/master/`: WordCount driver
+  - `cmd/merge_unsalt/`: Utility to combine salted keys
+  - `cmd/make_zipf/`: Zipf distribution generator
+  - `cmd/make_catastrophe/`: Catastrophe dataset generator
+  - `internal/jobs/`: WordCount job implementation
+
+- **`pagerank/`**: PageRank-specific code
+  - `cmd/master/`: PageRank driver
+  - `cmd/init_pagerank/`: Graph initialization utility
+  - `cmd/make_zipf_graph/`: Zipf-like graph generator
+  - `cmd/make_skewed_graph/`: Heavily skewed graph generator
+  - `internal/jobs/`: PageRank job implementation
+
 The system consists of:
 
 1. **Master**: Coordinator that orchestrates the MapReduce pipeline (supports both WordCount and PageRank)
@@ -65,21 +89,15 @@ make make_skewed_graph
 Alternatively, you can build manually:
 
 ```bash
-go build -o bin/master ./cmd/master
-go build -o bin/mapper ./cmd/mapper
-go build -o bin/reducer ./cmd/reducer
-go build -o bin/merge_unsalt ./cmd/merge_unsalt
-go build -o bin/make_zipf ./cmd/make_zipf
-go build -o bin/make_catastrophe ./cmd/make_catastrophe
-```
-
-Or build all at once:
-
-```bash
-for dir in cmd/*/; do
-    name=$(basename "$dir")
-    go build -o "bin/$name" "./cmd/$name"
-done
+go build -o bin/master ./common/cmd/master
+go build -o bin/mapper ./common/cmd/mapper
+go build -o bin/reducer ./common/cmd/reducer
+go build -o bin/merge_unsalt ./wordcount/cmd/merge_unsalt
+go build -o bin/make_zipf ./wordcount/cmd/make_zipf
+go build -o bin/make_catastrophe ./wordcount/cmd/make_catastrophe
+go build -o bin/init_pagerank ./pagerank/cmd/init_pagerank
+go build -o bin/make_zipf_graph ./pagerank/cmd/make_zipf_graph
+go build -o bin/make_skewed_graph ./pagerank/cmd/make_skewed_graph
 ```
 
 ## Usage

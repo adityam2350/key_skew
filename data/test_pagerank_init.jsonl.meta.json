@@ -1,0 +1,6 @@
+{
+  "num_nodes": 50,
+  "damping": 0.85,
+  "default_iterations": 10,
+  "source_input_path": "data/test_pagerank.txt"
+}

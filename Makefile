@@ -9,39 +9,39 @@ build: master mapper reducer merge_unsalt make_zipf make_catastrophe init_pagera
 # Build individual binaries
 master:
 	@mkdir -p bin
-	go build -o bin/master ./cmd/master
+	go build -o bin/master ./common/cmd/master
 
 mapper:
 	@mkdir -p bin
-	go build -o bin/mapper ./cmd/mapper
+	go build -o bin/mapper ./common/cmd/mapper
 
 reducer:
 	@mkdir -p bin
-	go build -o bin/reducer ./cmd/reducer
+	go build -o bin/reducer ./common/cmd/reducer
 
 merge_unsalt:
 	@mkdir -p bin
-	go build -o bin/merge_unsalt ./cmd/merge_unsalt
+	go build -o bin/merge_unsalt ./wordcount/cmd/merge_unsalt
 
 make_zipf:
 	@mkdir -p bin
-	go build -o bin/make_zipf ./cmd/make_zipf
+	go build -o bin/make_zipf ./wordcount/cmd/make_zipf
 
 make_catastrophe:
 	@mkdir -p bin
-	go build -o bin/make_catastrophe ./cmd/make_catastrophe
+	go build -o bin/make_catastrophe ./wordcount/cmd/make_catastrophe
 
 init_pagerank:
 	@mkdir -p bin
-	go build -o bin/init_pagerank ./cmd/init_pagerank
+	go build -o bin/init_pagerank ./pagerank/cmd/init_pagerank
 
 make_zipf_graph:
 	@mkdir -p bin
-	go build -o bin/make_zipf_graph ./cmd/make_zipf_graph
+	go build -o bin/make_zipf_graph ./pagerank/cmd/make_zipf_graph
 
 make_skewed_graph:
 	@mkdir -p bin
-	go build -o bin/make_skewed_graph ./cmd/make_skewed_graph
+	go build -o bin/make_skewed_graph ./pagerank/cmd/make_skewed_graph
 
 # Clean build artifacts
 clean:
