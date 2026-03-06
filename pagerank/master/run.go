@@ -6,19 +6,20 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"key_skew/common/common"
 	commonmaster "key_skew/common/master"
-	pagerankjobs "key_skew/pagerank/internal/jobs"
-	_ "key_skew/pagerank/internal/jobs" // Register PageRank job
+	_ "key_skew/pagerank/jobs"
+	pagerankjobs "key_skew/pagerank/jobs"
 )
 
-// PageRankConfig holds configuration for PageRank execution
 type PageRankConfig struct {
 	InputPath       string
 	RunDir          string
@@ -28,21 +29,25 @@ type PageRankConfig struct {
 	Iterations      int
 	Damping         float64
 	NumNodes        int
+	Mode            string
+	SampleRate      float64
+	HeavyTopPct     float64
+	FixedSplits     int
+	Seed            int64
 }
 
-// PageRankSummary holds metrics and summary information for a PageRank run
 type PageRankSummary struct {
+	Mode             string                      `json:"mode"`
 	M                int                         `json:"M"`
 	R                int                         `json:"R"`
 	Iterations       int                         `json:"iterations"`
 	Damping          float64                     `json:"damping"`
 	NumNodes         int                         `json:"num_nodes"`
 	TotalTimeMs      int64                       `json:"total_time_ms"`
-	IterationTimes   map[string]int64            `json:"iteration_times_ms"` // "iter_001": time_ms
-	IterationMetrics map[string]IterationMetrics `json:"iteration_metrics"`  // "iter_001": metrics
+	IterationTimes   map[string]int64            `json:"iteration_times_ms"`
+	IterationMetrics map[string]IterationMetrics `json:"iteration_metrics"`
 }
 
-// IterationMetrics holds metrics for a single PageRank iteration
 type IterationMetrics struct {
 	MapTimeMs      int64                     `json:"map_time_ms"`
 	ShuffleTimeMs  int64                     `json:"shuffle_time_ms"`
@@ -55,7 +60,6 @@ type IterationMetrics struct {
 }
 
 // RunPageRank is the main entry point for PageRank execution
-// It orchestrates multiple MapReduce iterations to compute PageRank
 func RunPageRank() {
 	runFlags := flag.NewFlagSet("run-pagerank", flag.ExitOnError)
 	var config PageRankConfig
@@ -66,14 +70,23 @@ func RunPageRank() {
 	runFlags.IntVar(&config.MaxParallelMaps, "max-parallel-maps", 8, "Maximum parallel mappers")
 	runFlags.IntVar(&config.Iterations, "iterations", 10, "Number of PageRank iterations")
 	runFlags.Float64Var(&config.Damping, "damping", 0.85, "PageRank damping factor")
-	runFlags.Parse(os.Args[2:]) // Parse flags after "run-pagerank"
+	runFlags.StringVar(&config.Mode, "mode", "baseline", "Mode: baseline or mitigation")
+	runFlags.Float64Var(&config.SampleRate, "sample-rate", 0.01, "Sampling rate (mitigation mode only)")
+	runFlags.Float64Var(&config.HeavyTopPct, "heavy-top-pct", 0.01, "Top percentage for heavy hitters (mitigation mode only)")
+	runFlags.IntVar(&config.FixedSplits, "fixed-splits", 8, "Fixed number of splits for heavy keys (mitigation mode only)")
+	runFlags.Int64Var(&config.Seed, "seed", 0, "Global seed for sampling")
+	runFlags.Parse(os.Args[2:])
 
 	if config.InputPath == "" {
 		fmt.Fprintf(os.Stderr, "Error: --input is required\n")
 		os.Exit(1)
 	}
 
-	// Read metadata to get numNodes if available
+	if config.Mode != "baseline" && config.Mode != "mitigation" {
+		fmt.Fprintf(os.Stderr, "Error: --mode must be 'baseline' or 'mitigation'\n")
+		os.Exit(1)
+	}
+
 	metaPath := config.InputPath + ".meta.json"
 	if metaFile, err := os.Open(metaPath); err == nil {
 		var meta map[string]interface{}
@@ -85,7 +98,6 @@ func RunPageRank() {
 		metaFile.Close()
 	}
 
-	// If numNodes not in metadata, count from input file
 	if config.NumNodes == 0 {
 		file, err := os.Open(config.InputPath)
 		if err == nil {
@@ -106,24 +118,21 @@ func RunPageRank() {
 		os.Exit(1)
 	}
 
-	// Initialize logging
 	if err := common.InitLogging(".", "master"); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize logging: %v\n", err)
 		os.Exit(1)
 	}
 	defer common.CloseLogging()
 
-	common.LogInfo("MASTER", "Starting PageRank: iterations=%d, M=%d, R=%d, nodes=%d", config.Iterations, config.M, config.R, config.NumNodes)
+	common.LogInfo("MASTER", "Starting PageRank: mode=%s, iterations=%d, M=%d, R=%d, nodes=%d", config.Mode, config.Iterations, config.M, config.R, config.NumNodes)
 
-	// Create run directory
 	timestamp := time.Now().Format("20060102_150405")
-	runPath := filepath.Join(config.RunDir, fmt.Sprintf("run_pagerank_%s", timestamp))
+	runPath := filepath.Join(config.RunDir, fmt.Sprintf("run_pagerank_%s_%s", config.Mode, timestamp))
 	if err := createPageRankDirectories(runPath, config.Iterations); err != nil {
 		common.LogError("MASTER", "Failed to create run directories: %v", err)
 		os.Exit(1)
 	}
 
-	// Update log directory
 	common.CloseLogging()
 	if err := common.InitLogging(filepath.Join(runPath, "logs"), "master"); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize logging: %v\n", err)
@@ -132,8 +141,8 @@ func RunPageRank() {
 
 	startTime := time.Now()
 
-	// Initialize summary
 	var summary PageRankSummary
+	summary.Mode = config.Mode
 	summary.M = config.M
 	summary.R = config.R
 	summary.Iterations = config.Iterations
@@ -142,8 +151,6 @@ func RunPageRank() {
 	summary.IterationTimes = make(map[string]int64)
 	summary.IterationMetrics = make(map[string]IterationMetrics)
 
-	// Copy original input graph file to run directory if it exists
-	// The input path is the initialized graph state (JSONL), try to find the original edge list
 	originalGraphPath := findOriginalGraphFile(config.InputPath)
 	if originalGraphPath != "" {
 		runGraphPath := filepath.Join(runPath, "input_graph.txt")
@@ -153,7 +160,6 @@ func RunPageRank() {
 			common.LogInfo("MASTER", "Copied input graph to run directory: %s", runGraphPath)
 		}
 
-		// Also copy metadata file if it exists
 		metaPath := originalGraphPath + ".meta.json"
 		if _, err := os.Stat(metaPath); err == nil {
 			runMetaPath := filepath.Join(runPath, "input_graph.txt.meta.json")
@@ -162,7 +168,6 @@ func RunPageRank() {
 			}
 		}
 	} else {
-		// If we can't find the original, reconstruct it from the graph state
 		common.LogInfo("MASTER", "Reconstructing edge list from graph state")
 		if err := reconstructEdgeListFromGraphState(config.InputPath, filepath.Join(runPath, "input_graph.txt")); err != nil {
 			common.LogWarn("MASTER", "Failed to reconstruct edge list: %v", err)
@@ -171,7 +176,6 @@ func RunPageRank() {
 		}
 	}
 
-	// Copy initial input to iter_000
 	iter0Path := filepath.Join(runPath, "iter_000", "input.jsonl")
 	if err := commonmaster.CopyFile(config.InputPath, iter0Path); err != nil {
 		common.LogError("MASTER", "Failed to copy initial input: %v", err)
@@ -180,7 +184,31 @@ func RunPageRank() {
 
 	currentInput := iter0Path
 
-	// Run iterations
+	var planPath string
+	if config.Mode == "mitigation" {
+		iter0Dir := filepath.Join(runPath, "iter_000")
+		if err := shardPageRankInput(iter0Path, iter0Dir, config.M); err != nil {
+			common.LogError("MASTER", "Failed to shard input for sampling: %v", err)
+			os.Exit(1)
+		}
+		common.LogInfo("MASTER", "Running sampling phase to detect heavy destination nodes")
+		sampleStart := time.Now()
+		if err := runPageRankMappersSample(config, runPath); err != nil {
+			common.LogError("MASTER", "Sample phase failed: %v", err)
+			os.Exit(1)
+		}
+		common.LogInfo("MASTER", "Sampling completed: elapsed=%dms", time.Since(sampleStart).Milliseconds())
+
+		planStart := time.Now()
+		var err error
+		planPath, err = createPageRankPartitionPlan(config, runPath)
+		if err != nil {
+			common.LogError("MASTER", "Failed to create partition plan: %v", err)
+			os.Exit(1)
+		}
+		common.LogInfo("MASTER", "Partition plan created: elapsed=%dms", time.Since(planStart).Milliseconds())
+	}
+
 	for iter := 1; iter <= config.Iterations; iter++ {
 		iterKey := fmt.Sprintf("iter_%03d", iter)
 		iterStart := time.Now()
@@ -194,21 +222,19 @@ func RunPageRank() {
 
 		var iterMetrics IterationMetrics
 
-		// Shard input (PageRank node records need to be wrapped in InputRecord format)
 		if err := shardPageRankInput(currentInput, iterDir, config.M); err != nil {
 			common.LogError("MASTER", "Iteration %d: failed to shard input: %v", iter, err)
 			os.Exit(1)
 		}
 
-		// Run mappers
+		var nextInput string
 		mapStart := time.Now()
-		if err := runPageRankMappers(config, iterDir); err != nil {
+		if err := runPageRankMappers(config, iterDir, planPath); err != nil {
 			common.LogError("MASTER", "Iteration %d: map phase failed: %v", iter, err)
 			os.Exit(1)
 		}
 		iterMetrics.MapTimeMs = time.Since(mapStart).Milliseconds()
 
-		// Shuffle
 		shuffleStart := time.Now()
 		if err := commonmaster.Shuffle(config.M, config.R, iterDir); err != nil {
 			common.LogError("MASTER", "Iteration %d: shuffle failed: %v", iter, err)
@@ -216,7 +242,6 @@ func RunPageRank() {
 		}
 		iterMetrics.ShuffleTimeMs = time.Since(shuffleStart).Milliseconds()
 
-		// Run reducers
 		reduceStart := time.Now()
 		if err := runPageRankReducers(config, iterDir); err != nil {
 			common.LogError("MASTER", "Iteration %d: reduce phase failed: %v", iter, err)
@@ -224,16 +249,21 @@ func RunPageRank() {
 		}
 		iterMetrics.ReduceTimeMs = time.Since(reduceStart).Milliseconds()
 
-		// Merge reducer outputs into next iteration input
 		mergeStart := time.Now()
-		nextInput := filepath.Join(iterDir, "next_input.jsonl")
-		if err := mergePageRankOutputs(config, iterDir, nextInput); err != nil {
-			common.LogError("MASTER", "Iteration %d: merge failed: %v", iter, err)
-			os.Exit(1)
+		nextInput = filepath.Join(iterDir, "next_input.jsonl")
+		if config.Mode == "mitigation" {
+			if err := runPageRankMergeUnsalt(config, iterDir, nextInput); err != nil {
+				common.LogError("MASTER", "Iteration %d: merge unsalt failed: %v", iter, err)
+				os.Exit(1)
+			}
+		} else {
+			if err := mergePageRankOutputs(config, iterDir, nextInput); err != nil {
+				common.LogError("MASTER", "Iteration %d: merge failed: %v", iter, err)
+				os.Exit(1)
+			}
 		}
 		iterMetrics.MergeTimeMs = time.Since(mergeStart).Milliseconds()
 
-		// Collect reducer metrics for this iteration
 		collectPageRankIterationMetrics(config, iterDir, &iterMetrics)
 
 		iterElapsed := time.Since(iterStart)
@@ -245,21 +275,18 @@ func RunPageRank() {
 		common.LogInfo("MASTER", "Iteration %d completed: elapsed=%dms", iter, iterElapsed.Milliseconds())
 	}
 
-	// Write final output
 	finalDir := filepath.Join(runPath, "final")
 	if err := os.MkdirAll(finalDir, 0755); err != nil {
 		common.LogError("MASTER", "Failed to create final directory: %v", err)
 		os.Exit(1)
 	}
 
-	// Write final ranks
 	finalRanksPath := filepath.Join(finalDir, "ranks.jsonl")
-		if err := commonmaster.CopyFile(currentInput, finalRanksPath); err != nil {
+	if err := commonmaster.CopyFile(currentInput, finalRanksPath); err != nil {
 		common.LogError("MASTER", "Failed to write final ranks: %v", err)
 		os.Exit(1)
 	}
 
-	// Write sorted ranks
 	if err := writeSortedRanks(currentInput, filepath.Join(finalDir, "ranks_sorted.jsonl")); err != nil {
 		common.LogWarn("MASTER", "Failed to write sorted ranks: %v", err)
 	}
@@ -267,7 +294,6 @@ func RunPageRank() {
 	totalTime := time.Since(startTime)
 	summary.TotalTimeMs = totalTime.Milliseconds()
 
-	// Write metrics
 	metricsPath := filepath.Join(runPath, "metrics", "run_summary.json")
 	if err := writePageRankMetrics(metricsPath, summary); err != nil {
 		common.LogError("MASTER", "Failed to write metrics: %v", err)
@@ -305,7 +331,6 @@ func createPageRankDirectories(runPath string, iterations int) error {
 }
 
 // shardPageRankInput shards PageRank node records into M shards
-// Each node record is wrapped in InputRecord format for the mapper
 func shardPageRankInput(inputPath string, iterDir string, M int) error {
 	file, err := os.Open(inputPath)
 	if err != nil {
@@ -313,7 +338,11 @@ func shardPageRankInput(inputPath string, iterDir string, M int) error {
 	}
 	defer file.Close()
 
-	// Create shard files
+	shardsDir := filepath.Join(iterDir, "shards")
+	if err := os.MkdirAll(shardsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create shards directory: %w", err)
+	}
+
 	shardFiles := make([]*os.File, M)
 	shardWriters := make([]*bufio.Writer, M)
 	for i := 0; i < M; i++ {
@@ -332,13 +361,11 @@ func shardPageRankInput(inputPath string, iterDir string, M int) error {
 		}
 	}()
 
-	// Distribute lines round-robin, wrapping each in InputRecord format
 	scanner := bufio.NewScanner(file)
 	shardIdx := 0
 	for scanner.Scan() {
 		line := scanner.Text()
 		if len(line) > 0 {
-			// Wrap the node record JSON in InputRecord format
 			inputRecord := common.InputRecord{Text: line}
 			jsonBytes, err := json.Marshal(inputRecord)
 			if err != nil {
@@ -361,8 +388,45 @@ func shardPageRankInput(inputPath string, iterDir string, M int) error {
 	return nil
 }
 
+// runPageRankMappersSample runs mappers in sample mode to detect heavy destination nodes
+func runPageRankMappersSample(config PageRankConfig, runPath string) error {
+	common.LogInfo("MASTER", "Running PageRank mappers in sample mode")
+
+	semaphore := make(chan struct{}, config.MaxParallelMaps)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	errors := make([]error, 0)
+
+	for i := 0; i < config.M; i++ {
+		wg.Add(1)
+		go func(mapID int) {
+			defer wg.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			shardPath := filepath.Join(runPath, "iter_000", "shards", fmt.Sprintf("shard_%03d.jsonl", mapID))
+			outDir := filepath.Join(runPath, "iter_000", "intermediate", fmt.Sprintf("map_%d", mapID))
+
+			cmd := commonmaster.BuildMapperCommand("sample", mapID, shardPath, outDir, config.SampleRate, 0, "", config.Seed, "pagerank")
+			if err := commonmaster.RunCommand(cmd, filepath.Join(runPath, "logs", fmt.Sprintf("mapper_%d_sample.log", mapID))); err != nil {
+				mu.Lock()
+				errors = append(errors, fmt.Errorf("mapper %d failed: %w", mapID, err))
+				mu.Unlock()
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	if len(errors) > 0 {
+		return fmt.Errorf("mapper errors: %v", errors)
+	}
+
+	return nil
+}
+
 // runPageRankMappers runs mappers for a PageRank iteration
-func runPageRankMappers(config PageRankConfig, iterDir string) error {
+func runPageRankMappers(config PageRankConfig, iterDir string, planPath string) error {
 	common.LogInfo("MASTER", "Running PageRank mappers")
 
 	semaphore := make(chan struct{}, config.MaxParallelMaps)
@@ -380,7 +444,7 @@ func runPageRankMappers(config PageRankConfig, iterDir string) error {
 			shardPath := filepath.Join(iterDir, "shards", fmt.Sprintf("shard_%03d.jsonl", mapID))
 			outDir := filepath.Join(iterDir, "intermediate", fmt.Sprintf("map_%d", mapID))
 
-			cmd := commonmaster.BuildMapperCommand("execute", mapID, shardPath, outDir, 0, config.R, "", 0, "pagerank")
+			cmd := commonmaster.BuildMapperCommand("execute", mapID, shardPath, outDir, 0, config.R, planPath, config.Seed, "pagerank")
 			if err := commonmaster.RunCommand(cmd, filepath.Join(iterDir, "..", "..", "logs", fmt.Sprintf("mapper_%d_execute.log", mapID))); err != nil {
 				mu.Lock()
 				errors = append(errors, fmt.Errorf("mapper %d failed: %w", mapID, err))
@@ -434,7 +498,7 @@ func runPageRankReducers(config PageRankConfig, iterDir string) error {
 
 // mergePageRankOutputs concatenates reducer outputs into next iteration input
 func mergePageRankOutputs(config PageRankConfig, iterDir string, outPath string) error {
-	common.LogInfo("MASTER", "Merging PageRank reducer outputs")
+	common.LogInfo("MASTER", "Merging PageRank reducer outputs (baseline)")
 
 	outFile, err := os.Create(outPath)
 	if err != nil {
@@ -449,7 +513,7 @@ func mergePageRankOutputs(config PageRankConfig, iterDir string, outPath string)
 		reducePath := filepath.Join(iterDir, "output", fmt.Sprintf("reduce_%d.jsonl", r))
 		file, err := os.Open(reducePath)
 		if err != nil {
-			continue // Skip if file doesn't exist
+			continue
 		}
 
 		scanner := bufio.NewScanner(file)
@@ -476,6 +540,32 @@ func mergePageRankOutputs(config PageRankConfig, iterDir string, outPath string)
 	return nil
 }
 
+// runPageRankMergeUnsalt runs merge_unsalt to combine salted keys back to original keys
+func runPageRankMergeUnsalt(config PageRankConfig, iterDir string, outPath string) error {
+	common.LogInfo("MASTER", "Running merge_unsalt for PageRank")
+
+	inputsGlob := filepath.Join(iterDir, "output", "reduce_*.jsonl")
+
+	var cmd *exec.Cmd
+	if _, err := os.Stat("bin/merge_unsalt_pagerank"); err == nil {
+		cmd = exec.Command("bin/merge_unsalt_pagerank",
+			"--inputs-glob", inputsGlob,
+			"--out", outPath,
+			"--damping", fmt.Sprintf("%.2f", config.Damping),
+			"--num-nodes", strconv.Itoa(config.NumNodes),
+		)
+	} else {
+		cmd = exec.Command("go", "run", "./pagerank/cmd/merge_unsalt",
+			"--inputs-glob", inputsGlob,
+			"--out", outPath,
+			"--damping", fmt.Sprintf("%.2f", config.Damping),
+			"--num-nodes", strconv.Itoa(config.NumNodes),
+		)
+	}
+
+	return commonmaster.RunCommand(cmd, filepath.Join(iterDir, "..", "..", "logs", "merge_unsalt.log"))
+}
+
 // writeSortedRanks writes final ranks sorted by descending rank
 func writeSortedRanks(inputPath string, outPath string) error {
 	file, err := os.Open(inputPath)
@@ -494,7 +584,7 @@ func writeSortedRanks(inputPath string, outPath string) error {
 
 		var record pagerankjobs.PageRankNodeRecord
 		if err := json.Unmarshal(line, &record); err != nil {
-			continue // Skip malformed records
+			continue
 		}
 		records = append(records, record)
 	}
@@ -503,12 +593,10 @@ func writeSortedRanks(inputPath string, outPath string) error {
 		return fmt.Errorf("error reading input: %w", err)
 	}
 
-	// Sort by descending rank
 	sort.Slice(records, func(i, j int) bool {
 		return records[i].Rank > records[j].Rank
 	})
 
-	// Write sorted output
 	outFile, err := os.Create(outPath)
 	if err != nil {
 		return fmt.Errorf("failed to create output: %w", err)
@@ -525,7 +613,7 @@ func writeSortedRanks(inputPath string, outPath string) error {
 	return nil
 }
 
-// collectPageRankIterationMetrics reads reducer stats and computes load balancing metrics for an iteration
+// collectPageRankIterationMetrics reads reducer stats and computes load balancing metrics
 func collectPageRankIterationMetrics(config PageRankConfig, iterDir string, metrics *IterationMetrics) {
 	metrics.ReducerLoad.Bytes = make([]int64, config.R)
 	metrics.ReducerLoad.Records = make([]int64, config.R)
@@ -555,7 +643,6 @@ func collectPageRankIterationMetrics(config PageRankConfig, iterDir string, metr
 		}
 	}
 
-	// Compute metrics
 	covBytes, covRecords, maxMedBytes, maxMedRecords := common.ComputeReducerLoadMetrics(metrics.ReducerLoad)
 	metrics.CoV = map[string]float64{
 		"bytes":   covBytes,
@@ -569,7 +656,6 @@ func collectPageRankIterationMetrics(config PageRankConfig, iterDir string, metr
 
 // writePageRankMetrics writes PageRank run summary metrics to a JSON file
 func writePageRankMetrics(metricsPath string, summary PageRankSummary) error {
-	// Create metrics directory if needed
 	if err := os.MkdirAll(filepath.Dir(metricsPath), 0755); err != nil {
 		return fmt.Errorf("failed to create metrics directory: %w", err)
 	}
@@ -585,25 +671,22 @@ func writePageRankMetrics(metricsPath string, summary PageRankSummary) error {
 	return encoder.Encode(summary)
 }
 
+// findOriginalGraphFile finds the original edge list file from graph state path
 func findOriginalGraphFile(graphStatePath string) string {
-
 	baseDir := filepath.Dir(graphStatePath)
 	baseName := filepath.Base(graphStatePath)
 
-	// Remove common suffixes
 	candidates := []string{
 		filepath.Join(baseDir, strings.TrimSuffix(baseName, "_init.jsonl")+".txt"),
 		filepath.Join(baseDir, strings.TrimSuffix(baseName, "_init.jsonl")),
 		filepath.Join(baseDir, strings.TrimSuffix(baseName, ".jsonl")+".txt"),
 		filepath.Join(baseDir, strings.TrimSuffix(baseName, ".jsonl")),
-		// Try common graph file names
 		filepath.Join(baseDir, "graph.txt"),
 		filepath.Join(baseDir, "graph_zipf.txt"),
 		filepath.Join(baseDir, "graph_skewed.txt"),
 		filepath.Join(baseDir, "test_graph.txt"),
 	}
 
-	// Also try parent directory
 	parentDir := filepath.Dir(baseDir)
 	candidates = append(candidates,
 		filepath.Join(parentDir, "graph.txt"),
@@ -621,6 +704,61 @@ func findOriginalGraphFile(graphStatePath string) string {
 	return ""
 }
 
+// createPageRankPartitionPlan analyzes sample data and creates a partition plan
+func createPageRankPartitionPlan(config PageRankConfig, runPath string) (string, error) {
+	common.LogInfo("MASTER", "Creating partition plan for PageRank")
+
+	aggregateCounts := make(map[string]int)
+	for m := 0; m < config.M; m++ {
+		samplePath := filepath.Join(runPath, "iter_000", "intermediate", fmt.Sprintf("map_%d", m), "sample_counts.json")
+		if file, err := os.Open(samplePath); err == nil {
+			var counts map[string]int
+			if json.NewDecoder(file).Decode(&counts) == nil {
+				for key, count := range counts {
+					aggregateCounts[key] += count
+				}
+			}
+			file.Close()
+		}
+	}
+
+	totalSamples := 0
+	for _, count := range aggregateCounts {
+		totalSamples += count
+	}
+
+	threshold := int(float64(totalSamples) * config.HeavyTopPct)
+	plan := &common.PartitionPlan{
+		R:     config.R,
+		Heavy: make(map[string]common.HeavyKeyInfo),
+	}
+
+	for key, count := range aggregateCounts {
+		if count >= threshold {
+			plan.Heavy[key] = common.HeavyKeyInfo{
+				Splits: config.FixedSplits,
+			}
+			common.LogInfo("MASTER", "Identified heavy destination node: %s (sample_count: %d, splits: %d)", key, count, config.FixedSplits)
+		}
+	}
+
+	planPath := filepath.Join(runPath, "partition_plan.json")
+	planFile, err := os.Create(planPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create plan file: %w", err)
+	}
+	defer planFile.Close()
+
+	encoder := json.NewEncoder(planFile)
+	if err := encoder.Encode(plan); err != nil {
+		return "", fmt.Errorf("failed to encode plan: %w", err)
+	}
+
+	common.LogInfo("MASTER", "Partition plan created: %d heavy nodes", len(plan.Heavy))
+	return planPath, nil
+}
+
+// reconstructEdgeListFromGraphState reconstructs edge list from graph state
 func reconstructEdgeListFromGraphState(graphStatePath, outputPath string) error {
 	file, err := os.Open(graphStatePath)
 	if err != nil {
@@ -646,10 +784,9 @@ func reconstructEdgeListFromGraphState(graphStatePath, outputPath string) error 
 
 		var nodeRecord pagerankjobs.PageRankNodeRecord
 		if err := json.Unmarshal(line, &nodeRecord); err != nil {
-			continue // Skip malformed records
+			continue
 		}
 
-		// Write edges: node -> neighbor
 		for _, neighbor := range nodeRecord.Neighbors {
 			if _, err := writer.WriteString(fmt.Sprintf("%s %s\n", nodeRecord.Node, neighbor)); err != nil {
 				return fmt.Errorf("failed to write edge: %w", err)

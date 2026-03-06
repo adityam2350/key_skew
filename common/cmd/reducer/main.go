@@ -1,210 +1,168 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"key_skew/common/common"
-	"key_skew/common/jobs"
-	// Import master packages to trigger job registration via their init() functions
-	_ "key_skew/wordcount/master"
-	_ "key_skew/pagerank/master"
+	commonjobs "key_skew/common/jobs"
+	_ "key_skew/pagerank/jobs"
+	_ "key_skew/wordcount/jobs"
 )
 
 func main() {
 	var reduceID int
-	var inputsFile string
+	var inputsPath string
 	var outPath string
 	var jobName string
 	var damping float64
 	var numNodes int
 
-	flag.IntVar(&reduceID, "reduce-id", -1, "Reducer ID")
-	flag.StringVar(&inputsFile, "inputs", "", "File containing list of input file paths")
-	flag.StringVar(&outPath, "out", "", "Output JSONL file path")
-	flag.StringVar(&jobName, "job", "wordcount", "Job name")
-	flag.Float64Var(&damping, "damping", 0.85, "PageRank damping factor (PageRank only)")
-	flag.IntVar(&numNodes, "num-nodes", 0, "Number of nodes in graph (PageRank only)")
+	flag.IntVar(&reduceID, "reduce-id", 0, "Reducer ID")
+	flag.StringVar(&inputsPath, "inputs", "", "File containing list of input file paths")
+	flag.StringVar(&outPath, "out", "", "Output file path")
+	flag.StringVar(&jobName, "job", "", "Job name (wordcount or pagerank)")
+	flag.Float64Var(&damping, "damping", 0.85, "PageRank damping factor (pagerank only)")
+	flag.IntVar(&numNodes, "num-nodes", 0, "Number of nodes (pagerank only)")
 	flag.Parse()
 
-	// Initialize logging
-	logDir := filepath.Join(filepath.Dir(outPath), "..", "..", "logs")
-	if err := common.InitLogging(logDir, fmt.Sprintf("reducer_%d", reduceID)); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to initialize logging: %v\n", err)
-		os.Exit(1)
-	}
-	defer common.CloseLogging()
-
-	startTime := time.Now()
-	common.LogInfo("REDUCER", "Starting reducer: reduce_id=%d, inputs=%s", reduceID, inputsFile)
-
-	// Read input file list
-	inputFiles, err := common.ReadReducerInputs(inputsFile)
-	if err != nil {
-		common.LogError("REDUCER", "Failed to read inputs file: %v", err)
+	if inputsPath == "" || outPath == "" || jobName == "" {
+		fmt.Fprintf(os.Stderr, "Error: --inputs, --out, and --job are required\n")
 		os.Exit(1)
 	}
 
-	// Get job from registry
-	registry := jobs.NewJobRegistry()
+	registry := commonjobs.NewJobRegistry()
 	job, ok := registry.Get(jobName)
 	if !ok {
-		common.LogError("REDUCER", "Unknown job: %s", jobName)
+		fmt.Fprintf(os.Stderr, "Error: Unknown job: %s\n", jobName)
 		os.Exit(1)
 	}
 
-	// Set job parameters from command-line flags
-	jobParams := make(map[string]interface{})
-	if damping > 0 {
-		jobParams["damping"] = damping
+	params := make(map[string]interface{})
+	if jobName == "pagerank" {
+		params["damping"] = damping
+		params["num_nodes"] = numNodes
 	}
-	if numNodes > 0 {
-		jobParams["num_nodes"] = numNodes
-	}
-	if err := job.SetParameters(jobParams); err != nil {
-		common.LogError("REDUCER", "Failed to set job parameters: %v", err)
+	if err := job.SetParameters(params); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to set job parameters: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Group by key in memory
-	// Use canonical string representation for grouping, but preserve original key type
-	keyGroups := make(map[string]interface{}) // canonical key -> values (type depends on job)
-	keyTypes := make(map[string]interface{})  // canonical key -> original key type
+	inputFiles, err := common.ReadReducerInputs(inputsPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to read inputs: %v\n", err)
+		os.Exit(1)
+	}
 
+	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to create output directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	keyValues := make(map[string][]interface{})
 	var recordsRead int64
 	var bytesRead int64
 
-	// Stream records from all input files
 	for _, inputFile := range inputFiles {
-		err := common.StreamJSONL(inputFile, func(record common.KV) error {
-			recordsRead++
-			// Approximate bytes read (JSON marshaled size)
-			if jsonBytes, err := json.Marshal(record); err == nil {
-				bytesRead += int64(len(jsonBytes) + 1) // +1 for newline
-			}
-
-			// Get canonical key representation
-			canonicalKey, err := common.CanonicalKey(record.K)
-			if err != nil {
-				return fmt.Errorf("failed to canonicalize key: %w", err)
-			}
-
-			// Store original key type if not seen before
-			if _, exists := keyTypes[canonicalKey]; !exists {
-				keyTypes[canonicalKey] = record.K
-			}
-
-			// Add value to group based on job type
-			if job.ValueType() == "string" {
-				// PageRank: values are JSON strings
-				if strValue, ok := record.V.(string); ok {
-					group, exists := keyGroups[canonicalKey]
-					if !exists {
-						keyGroups[canonicalKey] = []string{strValue}
-					} else if strGroup, ok := group.([]string); ok {
-						keyGroups[canonicalKey] = append(strGroup, strValue)
-					}
-				}
-			} else {
-				// WordCount: values are integers
-				if intValue, ok := record.V.(int); ok {
-					group, exists := keyGroups[canonicalKey]
-					if !exists {
-						keyGroups[canonicalKey] = []int{intValue}
-					} else if intGroup, ok := group.([]int); ok {
-						keyGroups[canonicalKey] = append(intGroup, intValue)
-					}
-				}
-			}
-
-			return nil
-		})
-
+		file, err := os.Open(inputFile)
 		if err != nil {
-			common.LogError("REDUCER", "Failed to stream from %s: %v", inputFile, err)
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "Warning: Failed to open %s: %v\n", inputFile, err)
+			continue
+		}
+
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			bytesRead += int64(len(line))
+			if len(line) == 0 {
+				continue
+			}
+
+			var kv common.KV
+			if err := json.Unmarshal(line, &kv); err != nil {
+				continue
+			}
+
+			recordsRead++
+
+			keyStr := fmt.Sprintf("%v", kv.K)
+			keyValues[keyStr] = append(keyValues[keyStr], kv.V)
+		}
+
+		file.Close()
+		if err := scanner.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Error reading %s: %v\n", inputFile, err)
 		}
 	}
 
-	// Create output directory
-	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
-		common.LogError("REDUCER", "Failed to create output directory: %v", err)
-		os.Exit(1)
-	}
-
-	// Open output file
 	outFile, err := os.Create(outPath)
 	if err != nil {
-		common.LogError("REDUCER", "Failed to create output file: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: Failed to create output file: %v\n", err)
 		os.Exit(1)
 	}
 	defer outFile.Close()
 
-	// Create encoder once for KV format jobs
 	encoder := json.NewEncoder(outFile)
+	var recordsWritten int64
 
-	// Reduce each key group using the job interface
-	for canonicalKey, values := range keyGroups {
-		// Extract base key (word without salt) for reduce function
-		baseKey, err := common.ExtractBaseKey(keyTypes[canonicalKey])
-		if err != nil {
-			common.LogError("REDUCER", "Failed to extract base key: %v", err)
-			os.Exit(1)
-		}
-
-		// Apply reduce function
-		result := job.Reduce(baseKey, values)
-
-		// Write output based on job's output format
-		if job.OutputFormat() == "raw" {
-			// PageRank: write raw JSON string
-			if resultStr, ok := result.(string); ok {
-				if _, err := outFile.WriteString(resultStr + "\n"); err != nil {
-					common.LogError("REDUCER", "Failed to write output record: %v", err)
-					os.Exit(1)
+	for keyStr, values := range keyValues {
+		var reduced interface{}
+		if job.ValueType() == "int" {
+			intValues := make([]int, len(values))
+			for i, v := range values {
+				if intVal, ok := v.(int); ok {
+					intValues[i] = intVal
+				} else if floatVal, ok := v.(float64); ok {
+					intValues[i] = int(floatVal)
 				}
 			}
-		} else {
-			// WordCount: write KV record
-			outputRecord := common.OutputRecord{
-				K: keyTypes[canonicalKey],
-				V: result,
+			reduced = job.Reduce(keyStr, intValues)
+		} else if job.ValueType() == "string" {
+			strValues := make([]string, len(values))
+			for i, v := range values {
+				if strVal, ok := v.(string); ok {
+					strValues[i] = strVal
+				} else {
+					strValues[i] = fmt.Sprintf("%v", v)
+				}
 			}
+			reduced = job.Reduce(keyStr, strValues)
+		} else {
+			reduced = job.Reduce(keyStr, values)
+		}
 
-			if err := encoder.Encode(outputRecord); err != nil {
-				common.LogError("REDUCER", "Failed to encode output record: %v", err)
-				os.Exit(1)
+		if job.OutputFormat() == "kv" {
+			output := common.OutputRecord{
+				K: keyStr,
+				V: reduced,
+			}
+			if err := encoder.Encode(output); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: Failed to encode output: %v\n", err)
+				continue
+			}
+		} else {
+			if err := encoder.Encode(reduced); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: Failed to encode output: %v\n", err)
+				continue
 			}
 		}
+		recordsWritten++
 	}
 
-	// Write stats
-	elapsed := time.Since(startTime)
-	stats := map[string]interface{}{
-		"records_read": recordsRead,
-		"bytes_read":   bytesRead,
-		"unique_keys":  len(keyGroups),
-		"elapsed_ms":   elapsed.Milliseconds(),
-	}
-
-	statsPath := filepath.Join(filepath.Dir(outPath), fmt.Sprintf("reduce_%d.stats.json", reduceID))
+	statsPath := outPath + ".stats.json"
 	statsFile, err := os.Create(statsPath)
-	if err != nil {
-		common.LogError("REDUCER", "Failed to create stats file: %v", err)
-		os.Exit(1)
+	if err == nil {
+		stats := map[string]interface{}{
+			"bytes_read":      bytesRead,
+			"records_read":    recordsRead,
+			"records_written": recordsWritten,
+		}
+		encoder := json.NewEncoder(statsFile)
+		encoder.Encode(stats)
+		statsFile.Close()
 	}
-	defer statsFile.Close()
-
-	statsEncoder := json.NewEncoder(statsFile)
-	if err := statsEncoder.Encode(stats); err != nil {
-		common.LogError("REDUCER", "Failed to encode stats: %v", err)
-		os.Exit(1)
-	}
-
-	common.LogInfo("REDUCER", "Reducer completed: records=%d, keys=%d, elapsed=%dms",
-		recordsRead, len(keyGroups), elapsed.Milliseconds())
 }

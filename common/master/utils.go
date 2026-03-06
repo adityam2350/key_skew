@@ -9,19 +9,17 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
-
-	"key_skew/common/common"
 )
 
-// CreateRunDirectories creates the standard directory structure for a MapReduce run
+// CreateRunDirectories creates the directory structure for a MapReduce run
 func CreateRunDirectories(runPath string) error {
 	dirs := []string{
 		filepath.Join(runPath, "shards"),
 		filepath.Join(runPath, "intermediate"),
 		filepath.Join(runPath, "shuffle"),
 		filepath.Join(runPath, "output"),
-		filepath.Join(runPath, "metrics"),
 		filepath.Join(runPath, "logs"),
+		filepath.Join(runPath, "metrics"),
 	}
 
 	for _, dir := range dirs {
@@ -33,7 +31,7 @@ func CreateRunDirectories(runPath string) error {
 	return nil
 }
 
-// ShardInput shards an input file into M shards using round-robin distribution
+// ShardInput splits an input file into M shards
 func ShardInput(inputPath string, runPath string, M int) error {
 	file, err := os.Open(inputPath)
 	if err != nil {
@@ -41,9 +39,8 @@ func ShardInput(inputPath string, runPath string, M int) error {
 	}
 	defer file.Close()
 
-	// Create shard files
 	shardFiles := make([]*os.File, M)
-	shardWriters := make([]*bufio.Writer, M)
+	shardWriters := make([]*os.File, M)
 	for i := 0; i < M; i++ {
 		shardPath := filepath.Join(runPath, "shards", fmt.Sprintf("shard_%03d.jsonl", i))
 		shardFile, err := os.Create(shardPath)
@@ -51,23 +48,26 @@ func ShardInput(inputPath string, runPath string, M int) error {
 			return fmt.Errorf("failed to create shard file: %w", err)
 		}
 		shardFiles[i] = shardFile
-		shardWriters[i] = bufio.NewWriter(shardFile)
+		shardWriters[i] = shardFile
 	}
 	defer func() {
-		for i, w := range shardWriters {
-			w.Flush()
-			shardFiles[i].Close()
+		for _, f := range shardFiles {
+			if f != nil {
+				f.Close()
+			}
 		}
 	}()
 
-	// Distribute lines round-robin
 	scanner := bufio.NewScanner(file)
 	shardIdx := 0
 	for scanner.Scan() {
-		line := scanner.Text()
+		line := scanner.Bytes()
 		if len(line) > 0 {
-			if _, err := shardWriters[shardIdx].WriteString(line + "\n"); err != nil {
+			if _, err := shardWriters[shardIdx].Write(line); err != nil {
 				return fmt.Errorf("failed to write to shard: %w", err)
+			}
+			if _, err := shardWriters[shardIdx].WriteString("\n"); err != nil {
+				return fmt.Errorf("failed to write newline: %w", err)
 			}
 			shardIdx = (shardIdx + 1) % M
 		}
@@ -80,25 +80,26 @@ func ShardInput(inputPath string, runPath string, M int) error {
 	return nil
 }
 
-// Shuffle collects partition files from mappers and groups them by reducer
+// Shuffle creates reducer input lists from mapper partition files
 func Shuffle(M, R int, runPath string) error {
-	common.LogInfo("MASTER", "Shuffling partition files")
-
-	// For each reducer, collect all partition files that belong to it
 	for r := 0; r < R; r++ {
-		var inputFiles []string
+		inputsPath := filepath.Join(runPath, "shuffle", fmt.Sprintf("reduce_%d_inputs.txt", r))
+		inputsFile, err := os.Create(inputsPath)
+		if err != nil {
+			return fmt.Errorf("failed to create reducer inputs file: %w", err)
+		}
+
 		for m := 0; m < M; m++ {
 			partPath := filepath.Join(runPath, "intermediate", fmt.Sprintf("map_%d", m), fmt.Sprintf("part_%03d.jsonl", r))
 			if _, err := os.Stat(partPath); err == nil {
-				inputFiles = append(inputFiles, partPath)
+				if _, err := inputsFile.WriteString(partPath + "\n"); err != nil {
+					inputsFile.Close()
+					return fmt.Errorf("failed to write reducer input: %w", err)
+				}
 			}
 		}
 
-		// Write list of input files for this reducer
-		inputsPath := filepath.Join(runPath, "shuffle", fmt.Sprintf("reduce_%d_inputs.txt", r))
-		if err := common.WriteReducerInputs(inputsPath, inputFiles); err != nil {
-			return fmt.Errorf("failed to write reducer inputs: %w", err)
-		}
+		inputsFile.Close()
 	}
 
 	return nil
@@ -106,7 +107,6 @@ func Shuffle(M, R int, runPath string) error {
 
 // BuildMapperCommand creates a command to run a mapper
 func BuildMapperCommand(mode string, mapID int, shardPath, outDir string, sampleRate float64, R int, planPath string, seed int64, jobName string) *exec.Cmd {
-	// Try binary first, fallback to go run
 	var cmd *exec.Cmd
 	if _, err := os.Stat("bin/mapper"); err == nil {
 		cmd = exec.Command("bin/mapper",
@@ -158,7 +158,6 @@ func BuildReducerCommand(reduceID int, inputsPath, outPath string, jobName strin
 		)
 	}
 
-	// Add PageRank-specific parameters
 	if jobName == "pagerank" {
 		cmd.Args = append(cmd.Args, "--damping", fmt.Sprintf("%.2f", damping))
 		cmd.Args = append(cmd.Args, "--num-nodes", strconv.Itoa(numNodes))
@@ -169,7 +168,6 @@ func BuildReducerCommand(reduceID int, inputsPath, outPath string, jobName strin
 
 // RunCommand executes a command with timeout and logging
 func RunCommand(cmd *exec.Cmd, logPath string) error {
-	// Create log directory if needed
 	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
@@ -227,4 +225,3 @@ func CopyFile(src, dst string) error {
 
 	return nil
 }
-

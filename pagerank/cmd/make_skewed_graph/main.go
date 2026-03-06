@@ -10,7 +10,6 @@ import (
 	"sort"
 )
 
-// SkewedGraphMetadata contains metadata about the generated skewed graph
 type SkewedGraphMetadata struct {
 	NumNodes     int            `json:"num_nodes"`
 	NumEdges     int            `json:"num_edges"`
@@ -48,25 +47,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize random number generator
 	rng := rand.New(rand.NewSource(seed))
 
-	// Designate hot nodes (first K nodes)
 	hotNodes := make(map[string]bool)
 	for i := 0; i < numHotNodes; i++ {
 		hotNode := fmt.Sprintf("n%06d", i+1)
 		hotNodes[hotNode] = true
 	}
 
-	// Calculate edge distribution
 	hotEdges := int(float64(numEdges) * hotEdgeFrac)
 	otherEdges := numEdges - hotEdges
 
-	// Track edges and counts
 	edges := make(map[string]map[string]bool)
 	hotNodeFreq := make(map[string]int)
 
-	// Create output file
 	outFile, err := os.Create(outPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create output file: %v\n", err)
@@ -79,23 +73,17 @@ func main() {
 
 	edgesWritten := 0
 
-	// Generate edges targeting hot nodes
-	// This creates extreme in-degree skew where a few nodes receive most edges
 	for edgesWritten < hotEdges {
-		// Select source uniformly from all nodes
 		srcIdx := rng.Intn(numNodes)
 		srcNode := fmt.Sprintf("n%06d", srcIdx+1)
 
-		// Select destination from hot nodes uniformly
 		hotIdx := rng.Intn(numHotNodes)
 		dstNode := fmt.Sprintf("n%06d", hotIdx+1)
 
-		// Avoid self-loops
 		if srcNode == dstNode {
 			continue
 		}
 
-		// Track edges to avoid duplicates
 		if edges[srcNode] == nil {
 			edges[srcNode] = make(map[string]bool)
 		}
@@ -104,7 +92,6 @@ func main() {
 		}
 		edges[srcNode][dstNode] = true
 
-		// Write edge
 		line := fmt.Sprintf("%s %s\n", srcNode, dstNode)
 		if _, err := writer.WriteString(line); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to write edge: %v\n", err)
@@ -115,23 +102,17 @@ func main() {
 		edgesWritten++
 	}
 
-	// Generate remaining edges uniformly across all nodes
-	// This ensures the graph is connected and not completely pathological
 	for edgesWritten < numEdges {
-		// Select source uniformly
 		srcIdx := rng.Intn(numNodes)
 		srcNode := fmt.Sprintf("n%06d", srcIdx+1)
 
-		// Select destination uniformly from all nodes
 		dstIdx := rng.Intn(numNodes)
 		dstNode := fmt.Sprintf("n%06d", dstIdx+1)
 
-		// Avoid self-loops
 		if srcNode == dstNode {
 			continue
 		}
 
-		// Track edges
 		if edges[srcNode] == nil {
 			edges[srcNode] = make(map[string]bool)
 		}
@@ -140,7 +121,6 @@ func main() {
 		}
 		edges[srcNode][dstNode] = true
 
-		// Write edge
 		line := fmt.Sprintf("%s %s\n", srcNode, dstNode)
 		if _, err := writer.WriteString(line); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to write edge: %v\n", err)
@@ -150,7 +130,6 @@ func main() {
 		edgesWritten++
 	}
 
-	// Write metadata file
 	metaPath := outPath + ".meta.json"
 	meta := SkewedGraphMetadata{
 		NumNodes:     numNodes,
@@ -177,7 +156,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Print summary
 	fmt.Printf("Generated heavily skewed graph:\n")
 	fmt.Printf("  Nodes: %d\n", numNodes)
 	fmt.Printf("  Edges: %d\n", edgesWritten)
@@ -185,7 +163,6 @@ func main() {
 	fmt.Printf("  Hot edges: %d (%.1f%%)\n", hotEdges, hotEdgeFrac*100)
 	fmt.Printf("  Other edges: %d\n", otherEdges)
 
-	// Show hot node frequencies
 	type hotFreq struct {
 		node string
 		freq int

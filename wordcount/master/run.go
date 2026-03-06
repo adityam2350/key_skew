@@ -12,10 +12,9 @@ import (
 
 	"key_skew/common/common"
 	commonmaster "key_skew/common/master"
-	_ "key_skew/wordcount/internal/jobs" // Register WordCount job
+	_ "key_skew/wordcount/jobs"
 )
 
-// RunConfig holds configuration for WordCount MapReduce execution
 type RunConfig struct {
 	InputPath       string
 	RunDir          string
@@ -29,7 +28,6 @@ type RunConfig struct {
 	Seed            int64
 }
 
-// RunSummary holds metrics and summary information for a WordCount run
 type RunSummary struct {
 	Mode           string                    `json:"mode"`
 	M              int                       `json:"M"`
@@ -55,9 +53,8 @@ func RunWordCount() {
 	runFlags.Float64Var(&config.HeavyTopPct, "heavy-top-pct", 0.01, "Top percentage for heavy hitters (mitigation only)")
 	runFlags.IntVar(&config.FixedSplits, "fixed-splits", 8, "Fixed number of splits for heavy keys (mitigation only)")
 	runFlags.Int64Var(&config.Seed, "seed", 0, "Global seed")
-	runFlags.Parse(os.Args[2:]) // Parse flags after "run"
+	runFlags.Parse(os.Args[2:])
 
-	// Initialize logging
 	if err := common.InitLogging(".", "master"); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize logging: %v\n", err)
 		os.Exit(1)
@@ -66,7 +63,6 @@ func RunWordCount() {
 
 	common.LogInfo("MASTER", "Starting MapReduce run: mode=%s, M=%d, R=%d", config.Mode, config.M, config.R)
 
-	// Create run directory
 	timestamp := time.Now().Format("20060102_150405")
 	runPath := filepath.Join(config.RunDir, fmt.Sprintf("run_%s_%s", config.Mode, timestamp))
 	if err := commonmaster.CreateRunDirectories(runPath); err != nil {
@@ -74,7 +70,6 @@ func RunWordCount() {
 		os.Exit(1)
 	}
 
-	// Update log directory to run directory
 	common.CloseLogging()
 	if err := common.InitLogging(filepath.Join(runPath, "logs"), "master"); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize logging: %v\n", err)
@@ -88,7 +83,6 @@ func RunWordCount() {
 	summary.R = config.R
 	summary.TimesMs = make(map[string]int64)
 
-	// Shard input
 	common.LogInfo("MASTER", "Sharding input into %d shards", config.M)
 	if err := commonmaster.ShardInput(config.InputPath, runPath, config.M); err != nil {
 		common.LogError("MASTER", "Failed to shard input: %v", err)
@@ -107,7 +101,6 @@ func RunWordCount() {
 	totalTime := time.Since(startTime)
 	summary.TimesMs["total"] = totalTime.Milliseconds()
 
-	// Write metrics
 	metricsPath := filepath.Join(runPath, "metrics", "run_summary.json")
 	if err := writeWordCountMetrics(metricsPath, summary); err != nil {
 		common.LogError("MASTER", "Failed to write metrics: %v", err)
@@ -117,11 +110,10 @@ func RunWordCount() {
 	common.LogInfo("MASTER", "Run completed: total_time=%dms", totalTime.Milliseconds())
 }
 
-// runBaseline executes a baseline (unmitigated) WordCount run
+// runBaseline executes a baseline WordCount run
 func runBaseline(config RunConfig, runPath string, summary *RunSummary) {
 	common.LogInfo("MASTER", "Running baseline mode")
 
-	// Run mappers
 	mapStart := time.Now()
 	if err := runMappers(config, runPath, ""); err != nil {
 		common.LogError("MASTER", "Map phase failed: %v", err)
@@ -129,15 +121,13 @@ func runBaseline(config RunConfig, runPath string, summary *RunSummary) {
 	}
 	summary.TimesMs["map"] = time.Since(mapStart).Milliseconds()
 
-	// Shuffle
 	shuffleStart := time.Now()
-		if err := commonmaster.Shuffle(config.M, config.R, runPath); err != nil {
+	if err := commonmaster.Shuffle(config.M, config.R, runPath); err != nil {
 		common.LogError("MASTER", "Shuffle failed: %v", err)
 		os.Exit(1)
 	}
 	summary.TimesMs["shuffle"] = time.Since(shuffleStart).Milliseconds()
 
-	// Run reducers
 	reduceStart := time.Now()
 	if err := runReducers(config, runPath); err != nil {
 		common.LogError("MASTER", "Reduce phase failed: %v", err)
@@ -145,7 +135,6 @@ func runBaseline(config RunConfig, runPath string, summary *RunSummary) {
 	}
 	summary.TimesMs["reduce"] = time.Since(reduceStart).Milliseconds()
 
-	// Merge reducer outputs
 	mergeStart := time.Now()
 	if err := mergeReducerOutputs(config, runPath); err != nil {
 		common.LogError("MASTER", "Merge failed: %v", err)
@@ -153,7 +142,6 @@ func runBaseline(config RunConfig, runPath string, summary *RunSummary) {
 	}
 	summary.TimesMs["merge"] = time.Since(mergeStart).Milliseconds()
 
-	// Collect metrics
 	collectMetrics(config, runPath, summary)
 
 	common.LogInfo("MASTER", "Baseline mode completed")
@@ -163,7 +151,6 @@ func runBaseline(config RunConfig, runPath string, summary *RunSummary) {
 func runMitigation(config RunConfig, runPath string, summary *RunSummary) {
 	common.LogInfo("MASTER", "Running mitigation mode")
 
-	// Phase 1: Sample
 	sampleStart := time.Now()
 	if err := runMappersSample(config, runPath); err != nil {
 		common.LogError("MASTER", "Sample phase failed: %v", err)
@@ -171,7 +158,6 @@ func runMitigation(config RunConfig, runPath string, summary *RunSummary) {
 	}
 	summary.TimesMs["sample"] = time.Since(sampleStart).Milliseconds()
 
-	// Phase 2: Analyze and create partition plan
 	planStart := time.Now()
 	planPath, heavyHitters, err := createPartitionPlan(config, runPath)
 	if err != nil {
@@ -181,7 +167,6 @@ func runMitigation(config RunConfig, runPath string, summary *RunSummary) {
 	summary.TimesMs["plan"] = time.Since(planStart).Milliseconds()
 	summary.HeavyHitters = heavyHitters
 
-	// Phase 3: Execute with plan
 	executeStart := time.Now()
 	if err := runMappers(config, runPath, planPath); err != nil {
 		common.LogError("MASTER", "Execute phase failed: %v", err)
@@ -189,15 +174,13 @@ func runMitigation(config RunConfig, runPath string, summary *RunSummary) {
 	}
 	summary.TimesMs["map"] = time.Since(executeStart).Milliseconds()
 
-	// Shuffle
 	shuffleStart := time.Now()
-		if err := commonmaster.Shuffle(config.M, config.R, runPath); err != nil {
+	if err := commonmaster.Shuffle(config.M, config.R, runPath); err != nil {
 		common.LogError("MASTER", "Shuffle failed: %v", err)
 		os.Exit(1)
 	}
 	summary.TimesMs["shuffle"] = time.Since(shuffleStart).Milliseconds()
 
-	// Run reducers
 	reduceStart := time.Now()
 	if err := runReducers(config, runPath); err != nil {
 		common.LogError("MASTER", "Reduce phase failed: %v", err)
@@ -205,7 +188,6 @@ func runMitigation(config RunConfig, runPath string, summary *RunSummary) {
 	}
 	summary.TimesMs["reduce"] = time.Since(reduceStart).Milliseconds()
 
-	// Merge and unsalt
 	mergeStart := time.Now()
 	if err := runMergeUnsalt(config, runPath); err != nil {
 		common.LogError("MASTER", "Merge unsalt failed: %v", err)
@@ -213,7 +195,6 @@ func runMitigation(config RunConfig, runPath string, summary *RunSummary) {
 	}
 	summary.TimesMs["merge"] = time.Since(mergeStart).Milliseconds()
 
-	// Collect metrics
 	collectMetrics(config, runPath, summary)
 
 	common.LogInfo("MASTER", "Mitigation mode completed")
@@ -347,7 +328,6 @@ func buildMergeUnsaltCommand(inputsGlob, outPath string) *exec.Cmd {
 func createPartitionPlan(config RunConfig, runPath string) (string, map[string]interface{}, error) {
 	common.LogInfo("MASTER", "Creating partition plan")
 
-	// Aggregate sample counts from all mappers
 	aggregateCounts := make(map[string]int)
 	for m := 0; m < config.M; m++ {
 		samplePath := filepath.Join(runPath, "intermediate", fmt.Sprintf("map_%d", m), "sample_counts.json")
@@ -362,7 +342,6 @@ func createPartitionPlan(config RunConfig, runPath string) (string, map[string]i
 		}
 	}
 
-	// Identify heavy hitters
 	totalSamples := 0
 	for _, count := range aggregateCounts {
 		totalSamples += count
@@ -387,7 +366,6 @@ func createPartitionPlan(config RunConfig, runPath string) (string, map[string]i
 		}
 	}
 
-	// Write plan
 	planPath := filepath.Join(runPath, "partition_plan.json")
 	planFile, err := os.Create(planPath)
 	if err != nil {
@@ -433,7 +411,6 @@ func collectMetrics(config RunConfig, runPath string, summary *RunSummary) {
 		}
 	}
 
-	// Compute metrics
 	covBytes, covRecords, maxMedBytes, maxMedRecords := common.ComputeReducerLoadMetrics(summary.ReducerLoad)
 	summary.CoV = map[string]float64{
 		"bytes":   covBytes,

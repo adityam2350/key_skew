@@ -8,6 +8,8 @@ A clean, modular Go implementation of a local MapReduce MVP that simulates a dis
   - **Baseline Mode**: Naive hash partitioning without skew mitigation
   - **Mitigation Mode**: Two-pass map pipeline with sampling, heavy-hitter detection, key salting, and merge_unsalt
 - **PageRank Job**: Iterative MapReduce for computing PageRank on directed graphs
+  - **Baseline Mode**: Single-stage PageRank computation without skew mitigation
+  - **Mitigation Mode**: Two-stage aggregation with selective salting for heavy destination nodes
   - Multiple iterations with graph structure preservation
   - Configurable damping factor
   - Final ranks output with optional sorting
@@ -40,7 +42,9 @@ The codebase is organized into three main directories:
   - `cmd/init_pagerank/`: Graph initialization utility
   - `cmd/make_zipf_graph/`: Zipf-like graph generator
   - `cmd/make_skewed_graph/`: Heavily skewed graph generator
-  - `internal/jobs/`: PageRank job implementation
+  - `cmd/analyze_heavy/`: Heavy-hitter analysis tool for mitigation mode
+  - `internal/jobs/`: PageRank job implementation (baseline, stage1, stage2)
+  - `internal/heavy/`: Heavy-hitter infrastructure (config, salted keys)
 
 The system consists of:
 
@@ -52,6 +56,7 @@ The system consists of:
    - WordCount: `make_zipf`, `make_catastrophe`
    - PageRank: `make_zipf_graph`, `make_skewed_graph`
 6. **Graph Initialization**: `init_pagerank` - Converts edge lists to graph state for PageRank
+7. **Heavy-Hitter Analysis**: `analyze_heavy` - Analyzes graph and generates heavy-hitter config for PageRank mitigation
 
 ### Data Flow
 
@@ -84,6 +89,7 @@ make make_catastrophe
 make init_pagerank
 make make_zipf_graph
 make make_skewed_graph
+make analyze_heavy
 ```
 
 Alternatively, you can build manually:
@@ -98,6 +104,7 @@ go build -o bin/make_catastrophe ./wordcount/cmd/make_catastrophe
 go build -o bin/init_pagerank ./pagerank/cmd/init_pagerank
 go build -o bin/make_zipf_graph ./pagerank/cmd/make_zipf_graph
 go build -o bin/make_skewed_graph ./pagerank/cmd/make_skewed_graph
+go build -o bin/analyze_heavy ./pagerank/cmd/analyze_heavy
 ```
 
 ## Usage
@@ -190,11 +197,39 @@ This creates:
 
 #### 3. Run PageRank
 
-Execute iterative PageRank computation:
+**Baseline Mode (no salting, backward compatible default):**
 
 ```bash
 ./bin/master run-pagerank \
   --input data/graph_init.jsonl \
+  --mode baseline \
+  --run-dir runs \
+  --M 8 \
+  --R 8 \
+  --max-parallel-maps 8 \
+  --iterations 10 \
+  --damping 0.85
+```
+
+**Mitigation Mode (with selective salting for heavy destination nodes):**
+
+First, analyze the graph to identify heavy-hitter destination nodes:
+
+```bash
+./bin/analyze_heavy \
+  --input data/graph_zipf.txt \
+  --top-k 10 \
+  --default-splits 8 \
+  --out heavy_config.json
+```
+
+Then run PageRank with mitigation:
+
+```bash
+./bin/master run-pagerank \
+  --input data/graph_init.jsonl \
+  --mode mitigation \
+  --heavy-config heavy_config.json \
   --run-dir runs \
   --M 8 \
   --R 8 \
@@ -205,11 +240,19 @@ Execute iterative PageRank computation:
 
 **Parameters:**
 - `--input`: Path to initialized graph state JSONL file
+- `--mode`: Execution mode: `baseline` (default) or `mitigation`
+- `--heavy-config`: Path to heavy-hitter config file (required for mitigation mode)
 - `--M`: Number of mappers
 - `--R`: Number of reducers
 - `--iterations`: Number of PageRank iterations (default: 10)
 - `--damping`: PageRank damping factor (default: 0.85)
 - `--max-parallel-maps`: Maximum parallel mappers (default: 8)
+
+**analyze_heavy Parameters:**
+- `--input`: Input edge list file path (src dst format)
+- `--top-k`: Number of top heavy-hitter nodes to select (default: 10)
+- `--default-splits`: Default number of splits for heavy nodes (default: 8)
+- `--out`: Output heavy config JSON file path
 
 ## How Salting Works
 
@@ -222,6 +265,8 @@ In naive hash partitioning, keys with high frequency (heavy hitters) all hash to
 
 ### Solution: Key Salting
 
+#### WordCount Salting
+
 1. **Sampling Pass**: Mappers sample keys and count frequencies
 2. **Heavy Hitter Detection**: Master identifies top `heavy-top-pct` keys by count
 3. **Salting**: Heavy keys are split into multiple salted variants:
@@ -230,15 +275,39 @@ In naive hash partitioning, keys with high frequency (heavy hitters) all hash to
 4. **Partitioning**: Each salted key hashes to a different reducer
 5. **Merge Unsalt**: After reduction, salted keys are combined back to original keys
 
-### Example
-
-If `"the"` is a heavy hitter with 8 splits:
+**Example:** If `"the"` is a heavy hitter with 8 splits:
 - `["the", 0]` → Reducer 3
 - `["the", 1]` → Reducer 7
 - `["the", 2]` → Reducer 2
 - ... (distributed across reducers)
 
 After reduction, merge_unsalt combines all salted variants back to `{"k": "the", "v": total_count}`.
+
+#### PageRank Selective Salting
+
+PageRank uses a two-stage aggregation pipeline for heavy destination nodes:
+
+1. **Heavy-Hitter Analysis**: Preprocess graph to identify top-K destination nodes by in-degree
+2. **Stage 1 (Salted Aggregation)**:
+   - Contributions to heavy destination nodes are salted: `(nodeID, salt)` where `salt = hash(sourceNodeID) % splitCount`
+   - Contributions to normal nodes remain unsalted
+   - Adjacency lists are never salted (preserve graph structure)
+   - Stage 1 reducers produce partial sums for each salted/unsalted key
+3. **Stage 2 (Merge and Update)**:
+   - Stage 2 mappers re-key all partial sums to original destination node IDs
+   - Stage 2 reducers merge partial sums, recover adjacency lists, and compute new ranks
+
+**Key Differences from WordCount:**
+- Only heavy destination nodes are salted (selective salting)
+- Graph structure (adjacency lists) is never salted
+- Deterministic salting based on source node ID (same source always maps to same salt bucket)
+- Two-stage pipeline instead of merge_unsalt utility
+
+**Example:** If node `"n000001"` is heavy with 8 splits:
+- Contribution from `"n000010"` → salted as `("n000001", hash("n000010") % 8)`
+- Contribution from `"n000020"` → salted as `("n000001", hash("n000020") % 8)`
+- All salted contributions are distributed across reducers in Stage 1
+- Stage 2 merges them back to `"n000001"` for rank update
 
 ## Output Structure
 
@@ -274,8 +343,15 @@ runs/run_baseline_20240301_120000/  (or run_mitigation_...)
 
 Each PageRank run creates a timestamped directory with iteration subdirectories:
 
+**Baseline mode:**
 ```
-runs/run_pagerank_20240301_120000/
+runs/run_pagerank_baseline_20240301_120000/
+```
+
+**Mitigation mode:**
+```
+runs/run_pagerank_mitigation_20240301_120000/
+├── heavy_config.json          # Copied heavy-hitter config
 ├── iter_000/                  # Initial state
 │   └── input.jsonl
 ├── iter_001/                  # First iteration
@@ -338,6 +414,7 @@ The `metrics/run_summary.json` file for PageRank contains:
 
 ```json
 {
+  "mode": "baseline|mitigation",
   "M": 8,
   "R": 8,
   "iterations": 10,
@@ -389,6 +466,7 @@ The `metrics/run_summary.json` file for PageRank contains:
 - Analyze performance trends across iterations
 - Identify load balancing issues in specific iterations
 - Compare iteration times to detect convergence patterns
+- Compare baseline vs mitigation mode performance and load distribution
 
 ## Implementation Details
 

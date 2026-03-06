@@ -11,7 +11,6 @@ import (
 	"sort"
 )
 
-// GraphMetadata contains metadata about the generated graph
 type GraphMetadata struct {
 	NumNodes    int            `json:"num_nodes"`
 	NumEdges    int            `json:"num_edges"`
@@ -43,12 +42,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize random number generator
 	rng := rand.New(rand.NewSource(seed))
 
-	// Create Zipf-like distribution for destination node selection
-	// This biases selection toward lower node IDs, creating hub nodes
-	// Higher zipfS values create more extreme skew (fewer hubs get more edges)
 	if zipfS <= 1.0 {
 		fmt.Fprintf(os.Stderr, "Error: zipf-s must be > 1.0 (got %.2f)\n", zipfS)
 		os.Exit(1)
@@ -62,8 +57,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Pre-compute Zipf-like probabilities for each node
-	// Probability for node i (0-indexed) is proportional to 1/(i+1)^s
 	probabilities := make([]float64, numNodes)
 	var sum float64
 	for i := 0; i < numNodes; i++ {
@@ -71,22 +64,18 @@ func main() {
 		probabilities[i] = prob
 		sum += prob
 	}
-	// Normalize
 	for i := 0; i < numNodes; i++ {
 		probabilities[i] /= sum
 	}
-	// Create cumulative distribution
 	cumulative := make([]float64, numNodes)
 	cumulative[0] = probabilities[0]
 	for i := 1; i < numNodes; i++ {
 		cumulative[i] = cumulative[i-1] + probabilities[i]
 	}
 
-	// Track edge counts for metadata
 	destCounts := make(map[string]int)
-	edges := make(map[string]map[string]bool) // Track edges to avoid duplicates
+	edges := make(map[string]map[string]bool)
 
-	// Create output file
 	outFile, err := os.Create(outPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create output file: %v\n", err)
@@ -99,17 +88,10 @@ func main() {
 
 	edgesWritten := 0
 
-	// Generate edges
-	// Source nodes are selected uniformly to ensure all nodes have some outgoing edges
-	// Destination nodes are selected using Zipf distribution to create hub nodes
 	for edgesWritten < numEdges {
-		// Select source node uniformly
 		srcIdx := rng.Intn(numNodes)
 		srcNode := fmt.Sprintf("n%06d", srcIdx+1)
 
-		// Select destination node using Zipf-like distribution
-		// This creates power-law in-degree distribution
-		// Use inverse transform sampling on cumulative distribution
 		u := rng.Float64()
 		dstIdx := 0
 		for i := 0; i < numNodes-1; i++ {
@@ -123,21 +105,18 @@ func main() {
 		}
 		dstNode := fmt.Sprintf("n%06d", dstIdx+1)
 
-		// Avoid self-loops
 		if srcNode == dstNode {
 			continue
 		}
 
-		// Track edges to avoid exact duplicates
 		if edges[srcNode] == nil {
 			edges[srcNode] = make(map[string]bool)
 		}
 		if edges[srcNode][dstNode] {
-			continue // Skip duplicate edge
+			continue
 		}
 		edges[srcNode][dstNode] = true
 
-		// Write edge
 		line := fmt.Sprintf("%s %s\n", srcNode, dstNode)
 		if _, err := writer.WriteString(line); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to write edge: %v\n", err)
@@ -148,10 +127,8 @@ func main() {
 		edgesWritten++
 	}
 
-	// Calculate statistics
 	avgOutDeg := float64(edgesWritten) / float64(numNodes)
 
-	// Find top destinations
 	type destFreq struct {
 		node string
 		freq int
@@ -164,13 +141,11 @@ func main() {
 		return topDests[i].freq > topDests[j].freq
 	})
 
-	// Take top 10
 	topDestFreq := make(map[string]int)
 	for i := 0; i < 10 && i < len(topDests); i++ {
 		topDestFreq[topDests[i].node] = topDests[i].freq
 	}
 
-	// Write metadata file
 	metaPath := outPath + ".meta.json"
 	meta := GraphMetadata{
 		NumNodes:    numNodes,
@@ -196,7 +171,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Print summary
 	fmt.Printf("Generated Zipf-like graph:\n")
 	fmt.Printf("  Nodes: %d\n", numNodes)
 	fmt.Printf("  Edges: %d\n", edgesWritten)

@@ -29,7 +29,6 @@ func main() {
 	flag.StringVar(&outPath, "out", "data/zipf.jsonl", "Output file path")
 	flag.Parse()
 
-	// Initialize logging
 	if err := common.InitLogging(".", "make_zipf"); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize logging: %v\n", err)
 		os.Exit(1)
@@ -39,13 +38,11 @@ func main() {
 	common.LogInfo("MAKE_ZIPF", "Generating Zipf dataset: N=%d, vocab=%d, s=%.2f, v=%.2f, words/record=%d, seed=%d",
 		nRecords, vocabSize, zipfS, zipfV, wordsPerRecord, seed)
 
-	// Create output directory
 	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
 		common.LogError("MAKE_ZIPF", "Failed to create output directory: %v", err)
 		os.Exit(1)
 	}
 
-	// Create output file
 	file, err := os.Create(outPath)
 	if err != nil {
 		common.LogError("MAKE_ZIPF", "Failed to create output file: %v", err)
@@ -53,19 +50,15 @@ func main() {
 	}
 	defer file.Close()
 
-	// Initialize random number generator
 	rng := rand.New(rand.NewSource(seed))
 
-	// Create Zipf distribution
 	zipf := rand.NewZipf(rng, zipfS, zipfV, uint64(vocabSize-1))
 
-	// Generate vocabulary
 	vocab := make([]string, vocabSize)
 	for i := 0; i < vocabSize; i++ {
 		vocab[i] = fmt.Sprintf("w%06d", i+1)
 	}
 
-	// Generate records
 	encoder := json.NewEncoder(file)
 	for i := 0; i < nRecords; i++ {
 		words := make([]string, wordsPerRecord)

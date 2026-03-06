@@ -10,15 +10,12 @@ import (
 	"strings"
 )
 
-// PageRankNodeRecord represents a node's state in the graph
-// This format is used as input/output for each PageRank iteration
 type PageRankNodeRecord struct {
 	Node      string   `json:"node"`
 	Rank      float64  `json:"rank"`
 	Neighbors []string `json:"neighbors"`
 }
 
-// GraphInitMetadata contains metadata about the initialized graph
 type GraphInitMetadata struct {
 	NumNodes          int     `json:"num_nodes"`
 	Damping           float64 `json:"damping"`
@@ -43,7 +40,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Read edge list
 	file, err := os.Open(inputPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to open input file: %v\n", err)
@@ -51,8 +47,6 @@ func main() {
 	}
 	defer file.Close()
 
-	// Build adjacency lists
-	// Map from node -> list of outgoing neighbors
 	adjacencyLists := make(map[string][]string)
 	allNodes := make(map[string]bool)
 
@@ -65,7 +59,6 @@ func main() {
 			continue
 		}
 
-		// Parse edge: "src dst"
 		parts := strings.Fields(line)
 		if len(parts) < 2 {
 			fmt.Fprintf(os.Stderr, "Warning: skipping malformed line %d: %s\n", lineNum, line)
@@ -78,7 +71,6 @@ func main() {
 		allNodes[src] = true
 		allNodes[dst] = true
 
-		// Add edge to adjacency list
 		adjacencyLists[src] = append(adjacencyLists[src], dst)
 	}
 
@@ -87,23 +79,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Count total nodes
 	numNodes := len(allNodes)
 	if numNodes == 0 {
 		fmt.Fprintf(os.Stderr, "Error: no nodes found in input file\n")
 		os.Exit(1)
 	}
 
-	// Initialize rank: 1.0 / N
 	initialRank := 1.0 / float64(numNodes)
 
-	// Create output directory
 	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create output directory: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Write graph state JSONL
 	outFile, err := os.Create(outPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create output file: %v\n", err)
@@ -113,12 +101,10 @@ func main() {
 
 	encoder := json.NewEncoder(outFile)
 
-	// Write one record per node
-	// Ensure all nodes are included, even if they have no outgoing edges
 	for node := range allNodes {
 		neighbors := adjacencyLists[node]
 		if neighbors == nil {
-			neighbors = []string{} // Empty list for nodes with no outgoing edges
+			neighbors = []string{}
 		}
 
 		record := PageRankNodeRecord{
@@ -133,7 +119,6 @@ func main() {
 		}
 	}
 
-	// Write metadata file
 	metaPath := outPath + ".meta.json"
 	meta := GraphInitMetadata{
 		NumNodes:          numNodes,

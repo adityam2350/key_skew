@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	wordcountmaster "key_skew/wordcount/master"
 	pagerankmaster "key_skew/pagerank/master"
+	wordcountmaster "key_skew/wordcount/master"
 )
 
 func main() {
@@ -21,6 +21,7 @@ func main() {
 	case "run-pagerank":
 		pagerankmaster.RunPageRank()
 	default:
+		fmt.Fprintf(os.Stderr, "Unknown subcommand: %s\n", subcommand)
 		fmt.Fprintf(os.Stderr, "Usage: %s <run|run-pagerank> [flags]\n", os.Args[0])
 		os.Exit(1)
 	}

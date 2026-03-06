@@ -27,7 +27,6 @@ func main() {
 	flag.StringVar(&outPath, "out", "data/catastrophe.jsonl", "Output file path")
 	flag.Parse()
 
-	// Initialize logging
 	if err := common.InitLogging(".", "make_catastrophe"); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize logging: %v\n", err)
 		os.Exit(1)
@@ -37,13 +36,11 @@ func main() {
 	common.LogInfo("MAKE_CATASTROPHE", "Generating catastrophe dataset: N=%d, hot_frac=%.2f, vocab=%d, words/record=%d, seed=%d",
 		nRecords, hotFrac, vocabSize, wordsPerRecord, seed)
 
-	// Create output directory
 	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
 		common.LogError("MAKE_CATASTROPHE", "Failed to create output directory: %v", err)
 		os.Exit(1)
 	}
 
-	// Create output file
 	file, err := os.Create(outPath)
 	if err != nil {
 		common.LogError("MAKE_CATASTROPHE", "Failed to create output file: %v", err)
@@ -51,10 +48,8 @@ func main() {
 	}
 	defer file.Close()
 
-	// Initialize random number generator
 	rng := rand.New(rand.NewSource(seed))
 
-	// Generate vocabulary (excluding HOT)
 	vocab := make([]string, vocabSize)
 	for i := 0; i < vocabSize; i++ {
 		vocab[i] = fmt.Sprintf("w%06d", i+1)
@@ -62,7 +57,6 @@ func main() {
 
 	hotKey := "HOT"
 
-	// Generate records
 	encoder := json.NewEncoder(file)
 	for i := 0; i < nRecords; i++ {
 		words := make([]string, wordsPerRecord)
@@ -70,7 +64,6 @@ func main() {
 			if rng.Float64() < hotFrac {
 				words[j] = hotKey
 			} else {
-				// Uniform distribution over other vocab words
 				idx := rng.Intn(vocabSize)
 				words[j] = vocab[idx]
 			}

@@ -2,72 +2,66 @@ package common
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
-	"time"
 )
 
-var logFile *os.File
-var logFilePath string
+var (
+	logFile *os.File
+	logger  *log.Logger
+)
 
 // InitLogging initializes logging to a file
-func InitLogging(logDir string, component string) error {
+func InitLogging(logDir, prefix string) error {
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	logFilePath = filepath.Join(logDir, fmt.Sprintf("%s.log", component))
+	logPath := filepath.Join(logDir, fmt.Sprintf("%s.log", prefix))
 	var err error
-	logFile, err = os.Create(logFilePath)
+	logFile, err = os.Create(logPath)
 	if err != nil {
 		return fmt.Errorf("failed to create log file: %w", err)
 	}
 
+	logger = log.New(logFile, "", log.LstdFlags)
 	return nil
 }
 
 // CloseLogging closes the log file
-func CloseLogging() error {
+func CloseLogging() {
 	if logFile != nil {
-		return logFile.Close()
-	}
-	return nil
-}
-
-// Log writes a log message to both stdout and the log file
-func Log(level, component, message string, args ...interface{}) {
-	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
-	formattedMsg := fmt.Sprintf(message, args...)
-	logLine := fmt.Sprintf("[%s] [%s] [%s] %s\n", timestamp, level, component, formattedMsg)
-
-	// Write to stdout
-	fmt.Print(logLine)
-
-	// Write to log file if initialized
-	if logFile != nil {
-		if _, err := logFile.WriteString(logLine); err != nil {
-			// If we can't write to log file, at least we tried
-			_ = err
-		}
+		logFile.Close()
+		logFile = nil
+		logger = nil
 	}
 }
 
 // LogInfo logs an info message
-func LogInfo(component, message string, args ...interface{}) {
-	Log("INFO", component, message, args...)
+func LogInfo(component, format string, args ...interface{}) {
+	if logger != nil {
+		logger.Printf("[%s] INFO: %s", component, fmt.Sprintf(format, args...))
+	}
 }
 
 // LogError logs an error message
-func LogError(component, message string, args ...interface{}) {
-	Log("ERROR", component, message, args...)
+func LogError(component, format string, args ...interface{}) {
+	if logger != nil {
+		logger.Printf("[%s] ERROR: %s", component, fmt.Sprintf(format, args...))
+	}
 }
 
 // LogWarn logs a warning message
-func LogWarn(component, message string, args ...interface{}) {
-	Log("WARN", component, message, args...)
+func LogWarn(component, format string, args ...interface{}) {
+	if logger != nil {
+		logger.Printf("[%s] WARN: %s", component, fmt.Sprintf(format, args...))
+	}
 }
 
 // LogDebug logs a debug message
-func LogDebug(component, message string, args ...interface{}) {
-	Log("DEBUG", component, message, args...)
+func LogDebug(component, format string, args ...interface{}) {
+	if logger != nil {
+		logger.Printf("[%s] DEBUG: %s", component, fmt.Sprintf(format, args...))
+	}
 }

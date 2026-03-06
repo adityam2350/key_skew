@@ -1,10 +1,10 @@
-.PHONY: all build clean master mapper reducer merge_unsalt make_zipf make_catastrophe init_pagerank make_zipf_graph make_skewed_graph
+.PHONY: all build clean master mapper reducer merge_unsalt make_zipf make_catastrophe init_pagerank make_zipf_graph make_skewed_graph merge_unsalt_pagerank analyze_heavy
 
 # Default target: build all binaries
 all: build
 
 # Build all binaries
-build: master mapper reducer merge_unsalt make_zipf make_catastrophe init_pagerank make_zipf_graph make_skewed_graph
+build: master mapper reducer merge_unsalt make_zipf make_catastrophe init_pagerank make_zipf_graph make_skewed_graph merge_unsalt_pagerank analyze_heavy
 
 # Build individual binaries
 master:
@@ -42,6 +42,14 @@ make_zipf_graph:
 make_skewed_graph:
 	@mkdir -p bin
 	go build -o bin/make_skewed_graph ./pagerank/cmd/make_skewed_graph
+
+merge_unsalt_pagerank:
+	@mkdir -p bin
+	go build -o bin/merge_unsalt_pagerank ./pagerank/cmd/merge_unsalt
+
+analyze_heavy:
+	@mkdir -p bin
+	go build -o bin/analyze_heavy ./pagerank/cmd/analyze_heavy
 
 # Clean build artifacts
 clean:

@@ -1,47 +1,67 @@
 package common
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/crc32"
 )
 
-// PartitionKey computes a stable partition ID for a key using CRC32
-// Key can be either:
-// - Unsalted: string "word" -> []byte("word")
-// - Salted: []interface{}{"word", salt} -> []byte("word#3")
-// Returns: crc32(key_representation) % R
+// PartitionKey computes which reducer should handle a key
 func PartitionKey(key interface{}, R int) (int, error) {
-	var keyBytes []byte
+	canonical, err := CanonicalKey(key)
+	if err != nil {
+		return 0, err
+	}
+	return int(crc32.ChecksumIEEE([]byte(canonical))) % R, nil
+}
 
+// CanonicalKey converts a key to a canonical string representation
+func CanonicalKey(key interface{}) (string, error) {
 	switch k := key.(type) {
 	case string:
-		keyBytes = []byte(k)
+		return k, nil
 	case []interface{}:
-		if len(k) == 2 {
-			word, ok1 := k[0].(string)
-			salt, ok2 := k[1].(float64)
-			if ok1 && ok2 {
-				keyBytes = []byte(fmt.Sprintf("%s#%.0f", word, salt))
-			} else {
-				// Try int for salt
-				if word, ok1 := k[0].(string); ok1 {
-					if saltInt, ok2 := k[1].(int); ok2 {
-						keyBytes = []byte(fmt.Sprintf("%s#%d", word, saltInt))
-					} else {
-						return 0, fmt.Errorf("invalid salted key format: %v", key)
-					}
-				} else {
-					return 0, fmt.Errorf("invalid salted key format: %v", key)
-				}
-			}
-		} else {
-			return 0, fmt.Errorf("invalid salted key format: expected 2 elements, got %d", len(k))
+		if len(k) != 2 {
+			return "", fmt.Errorf("invalid salted key format: expected [key, salt], got %v", k)
 		}
+		baseKey, ok := k[0].(string)
+		if !ok {
+			return "", fmt.Errorf("invalid salted key: base key must be string, got %T", k[0])
+		}
+		salt, ok := k[1].(float64)
+		if !ok {
+			return "", fmt.Errorf("invalid salted key: salt must be number, got %T", k[1])
+		}
+		return fmt.Sprintf("%s#%.0f", baseKey, salt), nil
 	default:
-		return 0, fmt.Errorf("unsupported key type for hashing: %T", key)
+		jsonBytes, err := json.Marshal(key)
+		if err != nil {
+			return "", fmt.Errorf("failed to canonicalize key %v: %w", key, err)
+		}
+		return string(jsonBytes), nil
 	}
+}
 
-	// Use IEEE polynomial (standard CRC32)
-	hash := crc32.ChecksumIEEE(keyBytes)
-	return int(hash) % R, nil
+// CreateSaltedKey creates a salted key representation
+func CreateSaltedKey(baseKey string, salt int) interface{} {
+	return []interface{}{baseKey, salt}
+}
+
+// ExtractBaseKey extracts the base key from a potentially salted key
+func ExtractBaseKey(key interface{}) (string, error) {
+	switch k := key.(type) {
+	case string:
+		return k, nil
+	case []interface{}:
+		if len(k) != 2 {
+			return "", fmt.Errorf("invalid salted key format: expected [key, salt], got %v", k)
+		}
+		baseKey, ok := k[0].(string)
+		if !ok {
+			return "", fmt.Errorf("invalid salted key: base key must be string, got %T", k[0])
+		}
+		return baseKey, nil
+	default:
+		return fmt.Sprintf("%v", key), nil
+	}
 }

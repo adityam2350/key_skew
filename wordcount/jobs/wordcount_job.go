@@ -1,16 +1,14 @@
 package jobs
 
 import (
-	commonjobs "key_skew/common/jobs"
 	"key_skew/common/common"
+	commonjobs "key_skew/common/jobs"
 )
 
 func init() {
-	// Register WordCount job in the global registry
 	commonjobs.RegisterJob(NewWordCountJob())
 }
 
-// WordCountJob implements the Job interface for word counting
 type WordCountJob struct {
 	params map[string]interface{}
 }
@@ -22,41 +20,47 @@ func NewWordCountJob() commonjobs.Job {
 	}
 }
 
+// Name returns the job name
 func (j *WordCountJob) Name() string {
 	return "wordcount"
 }
 
+// Map processes an input record and emits key-value pairs
 func (j *WordCountJob) Map(record common.InputRecord) []common.KV {
 	return MapRecord(record)
 }
 
+// Reduce aggregates values for a key
 func (j *WordCountJob) Reduce(key string, values interface{}) interface{} {
 	intValues, ok := values.([]int)
 	if !ok {
-		// Try to convert if possible
 		return 0
 	}
 	return ReduceKey(key, intValues)
 }
 
+// SupportsSkewMitigation returns true if the job supports skew mitigation
 func (j *WordCountJob) SupportsSkewMitigation() bool {
 	return true
 }
 
+// ValueType returns the type of values
 func (j *WordCountJob) ValueType() string {
 	return "int"
 }
 
+// OutputFormat returns the output format
 func (j *WordCountJob) OutputFormat() string {
 	return "kv"
 }
 
+// GetParameters returns the current job parameters
 func (j *WordCountJob) GetParameters() map[string]interface{} {
 	return j.params
 }
 
+// SetParameters sets job parameters
 func (j *WordCountJob) SetParameters(params map[string]interface{}) error {
-	// WordCount has no special parameters
 	j.params = params
 	return nil
 }
