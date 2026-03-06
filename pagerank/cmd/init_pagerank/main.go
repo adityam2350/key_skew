@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"key_skew/common/common"
 )
 
 type PageRankNodeRecord struct {
@@ -107,13 +109,20 @@ func main() {
 			neighbors = []string{}
 		}
 
-		record := PageRankNodeRecord{
+		nodeRecord := PageRankNodeRecord{
 			Node:      node,
 			Rank:      initialRank,
 			Neighbors: neighbors,
 		}
 
-		if err := encoder.Encode(record); err != nil {
+		nodeJSON, err := json.Marshal(nodeRecord)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to marshal node record: %v\n", err)
+			os.Exit(1)
+		}
+
+		inputRecord := common.InputRecord{Text: string(nodeJSON)}
+		if err := encoder.Encode(inputRecord); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to encode record: %v\n", err)
 			os.Exit(1)
 		}

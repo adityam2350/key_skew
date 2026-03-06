@@ -364,21 +364,18 @@ func shardPageRankInput(inputPath string, iterDir string, M int) error {
 	scanner := bufio.NewScanner(file)
 	shardIdx := 0
 	for scanner.Scan() {
-		line := scanner.Text()
-		if len(line) > 0 {
-			inputRecord := common.InputRecord{Text: line}
-			jsonBytes, err := json.Marshal(inputRecord)
-			if err != nil {
-				return fmt.Errorf("failed to marshal input record: %w", err)
-			}
-			if _, err := shardWriters[shardIdx].Write(jsonBytes); err != nil {
-				return fmt.Errorf("failed to write to shard: %w", err)
-			}
-			if _, err := shardWriters[shardIdx].WriteString("\n"); err != nil {
-				return fmt.Errorf("failed to write newline: %w", err)
-			}
-			shardIdx = (shardIdx + 1) % M
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
 		}
+
+		if _, err := shardWriters[shardIdx].Write(line); err != nil {
+			return fmt.Errorf("failed to write to shard: %w", err)
+		}
+		if _, err := shardWriters[shardIdx].WriteString("\n"); err != nil {
+			return fmt.Errorf("failed to write newline: %w", err)
+		}
+		shardIdx = (shardIdx + 1) % M
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -506,8 +503,7 @@ func mergePageRankOutputs(config PageRankConfig, iterDir string, outPath string)
 	}
 	defer outFile.Close()
 
-	writer := bufio.NewWriter(outFile)
-	defer writer.Flush()
+	encoder := json.NewEncoder(outFile)
 
 	for r := 0; r < config.R; r++ {
 		reducePath := filepath.Join(iterDir, "output", fmt.Sprintf("reduce_%d.jsonl", r))
@@ -519,15 +515,20 @@ func mergePageRankOutputs(config PageRankConfig, iterDir string, outPath string)
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
 			line := scanner.Bytes()
-			if len(line) > 0 {
-				if _, err := writer.Write(line); err != nil {
-					file.Close()
-					return fmt.Errorf("failed to write line: %w", err)
-				}
-				if _, err := writer.WriteString("\n"); err != nil {
-					file.Close()
-					return fmt.Errorf("failed to write newline: %w", err)
-				}
+			if len(line) == 0 {
+				continue
+			}
+
+			var jsonStr string
+			if err := json.Unmarshal(line, &jsonStr); err != nil {
+				file.Close()
+				return fmt.Errorf("failed to unmarshal reducer output: %w", err)
+			}
+
+			inputRecord := common.InputRecord{Text: jsonStr}
+			if err := encoder.Encode(inputRecord); err != nil {
+				file.Close()
+				return fmt.Errorf("failed to encode input record: %w", err)
 			}
 		}
 		file.Close()
@@ -582,11 +583,20 @@ func writeSortedRanks(inputPath string, outPath string) error {
 			continue
 		}
 
-		var record pagerankjobs.PageRankNodeRecord
-		if err := json.Unmarshal(line, &record); err != nil {
-			continue
+		var inputRecord common.InputRecord
+		if err := json.Unmarshal(line, &inputRecord); err == nil && inputRecord.Text != "" {
+			var record pagerankjobs.PageRankNodeRecord
+			if err := json.Unmarshal([]byte(inputRecord.Text), &record); err != nil {
+				continue
+			}
+			records = append(records, record)
+		} else {
+			var record pagerankjobs.PageRankNodeRecord
+			if err := json.Unmarshal(line, &record); err != nil {
+				continue
+			}
+			records = append(records, record)
 		}
-		records = append(records, record)
 	}
 
 	if err := scanner.Err(); err != nil {

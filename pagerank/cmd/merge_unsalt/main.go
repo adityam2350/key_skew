@@ -151,7 +151,14 @@ func main() {
 			Neighbors: neighbors,
 		}
 
-		if err := encoder.Encode(nodeRecord); err != nil {
+		nodeJSON, err := json.Marshal(nodeRecord)
+		if err != nil {
+			common.LogError("MERGE_UNSALT", "Failed to marshal node record: %v", err)
+			os.Exit(1)
+		}
+
+		inputRecord := common.InputRecord{Text: string(nodeJSON)}
+		if err := encoder.Encode(inputRecord); err != nil {
 			common.LogError("MERGE_UNSALT", "Failed to encode output record: %v", err)
 			os.Exit(1)
 		}
