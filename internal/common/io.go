@@ -157,15 +157,25 @@ func StreamJSONL(filepath string, callback func(record KV) error) error {
 			return fmt.Errorf("failed to unmarshal key in line %d: %w", lineNum, err)
 		}
 
-		// Extract value
+		// Extract value (can be int or string depending on job type)
 		valueJSON, ok := rawRecord["v"]
 		if !ok {
 			return fmt.Errorf("missing 'v' field in line %d", lineNum)
 		}
 
-		var value int
-		if err := json.Unmarshal(valueJSON, &value); err != nil {
-			return fmt.Errorf("failed to unmarshal value in line %d: %w", lineNum, err)
+		// Try to unmarshal as int first (for WordCount), then as string (for PageRank)
+		var value interface{}
+		var intValue int
+		if err := json.Unmarshal(valueJSON, &intValue); err == nil {
+			value = intValue
+		} else {
+			// Try as string (for PageRank JSON values)
+			var strValue string
+			if err := json.Unmarshal(valueJSON, &strValue); err == nil {
+				value = strValue
+			} else {
+				return fmt.Errorf("failed to unmarshal value in line %d: %w", lineNum, err)
+			}
 		}
 
 		record := KV{K: key, V: value}

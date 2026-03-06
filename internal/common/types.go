@@ -11,9 +11,10 @@ type InputRecord struct {
 }
 
 // KV represents a key-value pair in intermediate and output records
+// V can be int (for WordCount) or string (for PageRank JSON values)
 type KV struct {
 	K interface{} `json:"k"`
-	V int         `json:"v"`
+	V interface{} `json:"v"`
 }
 
 // OutputRecord is an alias for KV, used for reducer outputs

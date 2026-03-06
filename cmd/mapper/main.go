@@ -44,16 +44,16 @@ func main() {
 	defer common.CloseLogging()
 
 	if mode == "sample" {
-		runSampleMode(mapID, shardPath, outDir, sampleRate, seed)
+		runSampleMode(mapID, shardPath, outDir, sampleRate, seed, jobName)
 	} else if mode == "execute" {
-		runExecuteMode(mapID, shardPath, outDir, R, planPath)
+		runExecuteMode(mapID, shardPath, outDir, R, planPath, jobName)
 	} else {
 		common.LogError("MAPPER", "Invalid mode: %s (must be 'sample' or 'execute')", mode)
 		os.Exit(1)
 	}
 }
 
-func runSampleMode(mapID int, shardPath string, outDir string, sampleRate float64, seed int64) {
+func runSampleMode(mapID int, shardPath string, outDir string, sampleRate float64, seed int64, jobName string) {
 	startTime := time.Now()
 	common.LogInfo("MAPPER", "Starting sample mode: map_id=%d, shard=%s", mapID, shardPath)
 
@@ -71,14 +71,23 @@ func runSampleMode(mapID int, shardPath string, outDir string, sampleRate float6
 	sampleCounts := make(map[string]int)
 	sampledRecords := 0
 
+	// Get job from registry
+	registry := jobs.NewJobRegistry()
+	job, ok := registry.Get(jobName)
+	if !ok {
+		common.LogError("MAPPER", "Unknown job: %s", jobName)
+		os.Exit(1)
+	}
+
 	for _, record := range records {
-		kvs := jobs.MapRecord(record)
+		kvs := job.Map(record)
 		for _, kv := range kvs {
 			key, ok := kv.K.(string)
 			if !ok {
 				continue
 			}
-			if rng.Float64() < sampleRate {
+			// Only sample integer values (WordCount), skip PageRank values
+			if job.ValueType() == "int" && rng.Float64() < sampleRate {
 				sampleCounts[key]++
 				sampledRecords++
 			}
@@ -131,9 +140,9 @@ func runSampleMode(mapID int, shardPath string, outDir string, sampleRate float6
 		len(records), sampledRecords, elapsed.Milliseconds())
 }
 
-func runExecuteMode(mapID int, shardPath string, outDir string, R int, planPath string) {
+func runExecuteMode(mapID int, shardPath string, outDir string, R int, planPath string, jobName string) {
 	startTime := time.Now()
-	common.LogInfo("MAPPER", "Starting execute mode: map_id=%d, shard=%s, R=%d", mapID, shardPath, R)
+	common.LogInfo("MAPPER", "Starting execute mode: map_id=%d, shard=%s, R=%d, job=%s", mapID, shardPath, R, jobName)
 
 	// Load partition plan if provided
 	plan := &common.PartitionPlan{
@@ -197,8 +206,16 @@ func runExecuteMode(mapID int, shardPath string, outDir string, R int, planPath 
 	nextSalt := make(map[string]int)
 	kvEmitted := 0
 
+	// Get job from registry
+	registry := jobs.NewJobRegistry()
+	job, ok := registry.Get(jobName)
+	if !ok {
+		common.LogError("MAPPER", "Unknown job: %s", jobName)
+		os.Exit(1)
+	}
+
 	for _, record := range records {
-		kvs := jobs.MapRecord(record)
+		kvs := job.Map(record)
 		for _, kv := range kvs {
 			key, ok := kv.K.(string)
 			if !ok {
@@ -206,14 +223,19 @@ func runExecuteMode(mapID int, shardPath string, outDir string, R int, planPath 
 			}
 
 			var outKey interface{}
-			// Check if key is heavy
-			if heavyInfo, isHeavy := plan.Heavy[key]; isHeavy {
-				// Salt the key
-				salt := nextSalt[key] % heavyInfo.Splits
-				outKey = common.CreateSaltedKey(key, salt)
-				nextSalt[key]++
+			// Apply skew mitigation if job supports it
+			if job.SupportsSkewMitigation() {
+				if heavyInfo, isHeavy := plan.Heavy[key]; isHeavy {
+					// Salt the key
+					salt := nextSalt[key] % heavyInfo.Splits
+					outKey = common.CreateSaltedKey(key, salt)
+					nextSalt[key]++
+				} else {
+					// Unsalted key
+					outKey = key
+				}
 			} else {
-				// Unsalted key
+				// Job doesn't support skew mitigation (e.g., PageRank)
 				outKey = key
 			}
 

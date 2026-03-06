@@ -56,8 +56,10 @@ func main() {
 				return fmt.Errorf("failed to extract base key: %w", err)
 			}
 
-			// Aggregate values
-			aggregated[baseKey] += record.V
+			// Aggregate values (only for WordCount - int values)
+			if intValue, ok := record.V.(int); ok {
+				aggregated[baseKey] += intValue
+			}
 
 			return nil
 		})
