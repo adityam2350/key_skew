@@ -13,6 +13,11 @@ func ComputeReducerLoadMetrics(load ReducerLoadMetrics) (covBytes, covRecords, m
 	return
 }
 
+// ComputeCoV computes the coefficient of variation for a slice of int64 values
+func ComputeCoV(values []int64) float64 {
+	return computeCoV(values)
+}
+
 // computeCoV computes the coefficient of variation
 func computeCoV(values []int64) float64 {
 	if len(values) == 0 {

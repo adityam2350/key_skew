@@ -55,8 +55,10 @@ type IterationMetrics struct {
 	MergeTimeMs    int64                     `json:"merge_time_ms"`
 	TotalTimeMs    int64                     `json:"total_time_ms"`
 	ReducerLoad    common.ReducerLoadMetrics `json:"reducer_load"`
+	ReducerTimesMs []int64                   `json:"reducer_times_ms"`
 	CoV            map[string]float64        `json:"cov"`
 	MaxMedianRatio map[string]float64        `json:"max_median_ratio"`
+	ReducerTimeCoV float64                   `json:"reducer_time_cov"`
 }
 
 // RunPageRank is the main entry point for PageRank execution
@@ -243,11 +245,13 @@ func RunPageRank() {
 		iterMetrics.ShuffleTimeMs = time.Since(shuffleStart).Milliseconds()
 
 		reduceStart := time.Now()
-		if err := runPageRankReducers(config, iterDir); err != nil {
+		reducerTimes, err := runPageRankReducers(config, iterDir)
+		if err != nil {
 			common.LogError("MASTER", "Iteration %d: reduce phase failed: %v", iter, err)
 			os.Exit(1)
 		}
 		iterMetrics.ReduceTimeMs = time.Since(reduceStart).Milliseconds()
+		iterMetrics.ReducerTimesMs = reducerTimes
 
 		mergeStart := time.Now()
 		nextInput = filepath.Join(iterDir, "next_input.jsonl")
@@ -459,13 +463,14 @@ func runPageRankMappers(config PageRankConfig, iterDir string, planPath string) 
 	return nil
 }
 
-// runPageRankReducers runs reducers for a PageRank iteration
-func runPageRankReducers(config PageRankConfig, iterDir string) error {
+// runPageRankReducers runs reducers for a PageRank iteration and returns their completion times
+func runPageRankReducers(config PageRankConfig, iterDir string) ([]int64, error) {
 	common.LogInfo("MASTER", "Running PageRank reducers")
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	errors := make([]error, 0)
+	reducerTimes := make([]int64, config.R)
 
 	for r := 0; r < config.R; r++ {
 		wg.Add(1)
@@ -476,9 +481,16 @@ func runPageRankReducers(config PageRankConfig, iterDir string) error {
 			outPath := filepath.Join(iterDir, "output", fmt.Sprintf("reduce_%d.jsonl", reduceID))
 
 			cmd := commonmaster.BuildReducerCommand(reduceID, inputsPath, outPath, "pagerank", config.Damping, config.NumNodes)
+
+			startTime := time.Now()
 			if err := commonmaster.RunCommand(cmd, filepath.Join(iterDir, "..", "..", "logs", fmt.Sprintf("reducer_%d.log", reduceID))); err != nil {
 				mu.Lock()
 				errors = append(errors, fmt.Errorf("reducer %d failed: %w", reduceID, err))
+				mu.Unlock()
+			} else {
+				elapsed := time.Since(startTime)
+				mu.Lock()
+				reducerTimes[reduceID] = elapsed.Milliseconds()
 				mu.Unlock()
 			}
 		}(r)
@@ -487,10 +499,10 @@ func runPageRankReducers(config PageRankConfig, iterDir string) error {
 	wg.Wait()
 
 	if len(errors) > 0 {
-		return fmt.Errorf("reducer errors: %v", errors)
+		return nil, fmt.Errorf("reducer errors: %v", errors)
 	}
 
-	return nil
+	return reducerTimes, nil
 }
 
 // mergePageRankOutputs concatenates reducer outputs into next iteration input
@@ -661,6 +673,10 @@ func collectPageRankIterationMetrics(config PageRankConfig, iterDir string, metr
 	metrics.MaxMedianRatio = map[string]float64{
 		"bytes":   maxMedBytes,
 		"records": maxMedRecords,
+	}
+
+	if len(metrics.ReducerTimesMs) > 0 {
+		metrics.ReducerTimeCoV = common.ComputeCoV(metrics.ReducerTimesMs)
 	}
 }
 
