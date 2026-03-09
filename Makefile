@@ -1,4 +1,4 @@
-.PHONY: all build clean master mapper reducer merge_unsalt make_zipf make_catastrophe
+.PHONY: all build clean test master mapper reducer merge_unsalt make_zipf make_catastrophe
 
 # Default target: build all binaries
 all: build
@@ -30,6 +30,10 @@ make_zipf:
 make_catastrophe:
 	@mkdir -p bin
 	go build -o bin/make_catastrophe ./cmd/make_catastrophe
+
+# Run all unit tests
+test:
+	go test ./internal/...
 
 # Clean build artifacts
 clean:
