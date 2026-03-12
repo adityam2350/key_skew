@@ -23,19 +23,19 @@ A clean, modular Go implementation of a local MapReduce MVP that simulates a dis
 The codebase is organized into three main directories:
 
 - **`common/`**: Shared code used by both WordCount and PageRank jobs
-  - `cmd/master/`: Master dispatcher and shared utilities
+  - `cmd/master/`: Master dispatcher entry point
   - `cmd/mapper/`: Mapper worker (job-agnostic)
   - `cmd/reducer/`: Reducer worker (job-agnostic)
-  - `internal/common/`: Shared utilities (types, hashing, I/O, logging, metrics)
-  - `internal/jobs/`: Job interface and registry
-  - `internal/master/`: Shared master utilities
+  - `common/`: Shared utilities (types, hashing, I/O, logging, metrics)
+  - `jobs/`: Job interface and registry
+  - `master/`: Shared master utilities (sharding, shuffle, merge)
 
 - **`wordcount/`**: WordCount-specific code
   - `cmd/master/`: WordCount driver
   - `cmd/merge_unsalt/`: Utility to combine salted keys
   - `cmd/make_zipf/`: Zipf distribution generator
   - `cmd/make_catastrophe/`: Catastrophe dataset generator
-  - `internal/jobs/`: WordCount job implementation
+  - `jobs/`: WordCount job implementation
 
 - **`pagerank/`**: PageRank-specific code
   - `cmd/master/`: PageRank driver
@@ -43,7 +43,7 @@ The codebase is organized into three main directories:
   - `cmd/make_zipf_graph/`: Zipf-like graph generator
   - `cmd/make_skewed_graph/`: Heavily skewed graph generator
   - `cmd/analyze_heavy/`: Heavy-hitter analysis tool for mitigation mode
-  - `internal/jobs/`: PageRank job implementation (baseline, stage1, stage2)
+  - `jobs/`: PageRank job implementation (baseline, stage1, stage2)
   - `internal/heavy/`: Heavy-hitter infrastructure (config, salted keys)
 
 The system consists of:
@@ -495,7 +495,7 @@ All communication between components is file-based:
 
 ### Binaries Not Found
 
-If `bin/mapper`, `bin/reducer`, etc. don't exist, the master will fallback to `go run ./cmd/mapper`. For faster execution, build binaries first.
+If `bin/mapper`, `bin/reducer`, etc. don't exist, build them first with `make` before running the master.
 
 ### Permission Errors
 
@@ -534,7 +534,7 @@ The framework uses a pluggable job interface, making it easy to add new MapReduc
 - **WordCount**: Integer values, supports skew mitigation, outputs KV records
 - **PageRank**: String values (JSON), no skew mitigation, outputs raw JSON node records
 
-To add a new job, implement the `Job` interface in `internal/jobs/` and register it in the job registry.
+To add a new job, implement the `Job` interface in `common/jobs/` and register it in the job registry.
 
 ## Project Structure
 
@@ -543,33 +543,47 @@ key_skew/
 ├── go.mod
 ├── README.md
 ├── Makefile
-├── cmd/
-│   ├── master/
-│   │   ├── main.go              # Dispatcher
-│   │   ├── common.go            # Shared utilities
-│   │   ├── wordcount_driver.go  # WordCount execution
-│   │   └── pagerank_driver.go   # PageRank execution
-│   ├── mapper/main.go           # Mapper worker
-│   ├── reducer/main.go          # Reducer worker
-│   ├── merge_unsalt/main.go     # Merge utility (WordCount)
-│   ├── make_zipf/main.go        # Zipf word generator
-│   ├── make_catastrophe/main.go # Catastrophe generator
-│   ├── make_zipf_graph/main.go  # Zipf graph generator
-│   ├── make_skewed_graph/main.go # Skewed graph generator
-│   └── init_pagerank/main.go    # Graph initialization
-└── internal/
-    ├── common/
-    │   ├── types.go             # Shared types
-    │   ├── hashing.go           # Partitioning
-    │   ├── io.go                # JSONL I/O
-    │   ├── metrics.go           # Metrics computation
-    │   └── logging.go           # Logging
-    └── jobs/
-        ├── interface.go         # Job interface
-        ├── wordcount.go         # WordCount implementation
-        ├── wordcount_job.go     # WordCount job wrapper
-        ├── pagerank.go          # PageRank implementation
-        └── pagerank_job.go      # PageRank job wrapper
+├── common/
+│   ├── cmd/
+│   │   ├── master/main.go       # Dispatcher entry point
+│   │   ├── mapper/main.go       # Mapper worker
+│   │   └── reducer/main.go      # Reducer worker
+│   ├── common/
+│   │   ├── types.go             # Shared types
+│   │   ├── hashing.go           # Partitioning
+│   │   ├── io.go                # JSONL I/O
+│   │   ├── metrics.go           # Metrics computation
+│   │   └── logging.go           # Logging
+│   ├── jobs/
+│   │   ├── interface.go         # Job interface
+│   │   └── loader.go            # Job registry
+│   └── master/
+│       └── utils.go             # Sharding, shuffle, merge
+├── wordcount/
+│   ├── cmd/
+│   │   ├── master/driver.go     # WordCount driver
+│   │   ├── merge_unsalt/main.go # Merge utility
+│   │   ├── make_zipf/main.go    # Zipf word generator
+│   │   └── make_catastrophe/main.go # Catastrophe generator
+│   ├── jobs/
+│   │   ├── wordcount.go         # WordCount implementation
+│   │   └── wordcount_job.go     # WordCount job wrapper
+│   └── master/run.go            # WordCount execution logic
+└── pagerank/
+    ├── cmd/
+    │   ├── master/driver.go     # PageRank driver
+    │   ├── init_pagerank/main.go # Graph initialization
+    │   ├── make_zipf_graph/main.go # Zipf graph generator
+    │   ├── make_skewed_graph/main.go # Skewed graph generator
+    │   ├── analyze_heavy/main.go # Heavy-hitter analysis
+    │   └── merge_unsalt/main.go  # Merge utility (PageRank)
+    ├── jobs/
+    │   ├── pagerank.go          # PageRank implementation
+    │   └── pagerank_job.go      # PageRank job wrapper
+    ├── internal/heavy/
+    │   ├── heavy_config.go      # Heavy-hitter config
+    │   └── salted_key.go        # Salted key utilities
+    └── master/run.go            # PageRank execution logic
 ```
 
 ## License
