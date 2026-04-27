@@ -51,8 +51,11 @@ func main() {
 				return fmt.Errorf("failed to extract base key: %w", err)
 			}
 
-			if intValue, ok := record.V.(int); ok {
-				aggregated[baseKey] += intValue
+			switch v := record.V.(type) {
+			case float64:
+				aggregated[baseKey] += int(v)
+			case int:
+				aggregated[baseKey] += v
 			}
 
 			return nil

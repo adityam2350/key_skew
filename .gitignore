@@ -22,6 +22,10 @@ bin/**
 # data/
 # data/**
 
+# Personal session notes (not for group repo)
+CLAUDE.md
+CAPSTONE_DESIGN.md
+
 # OS files
 .DS_Store
 Thumbs.db

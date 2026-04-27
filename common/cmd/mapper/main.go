@@ -160,6 +160,8 @@ func runExecuteMode(shardFile *os.File, outDir string, job commonjobs.Job, R int
 	var recordsProcessed int64
 	var kvsEmitted int64
 
+	saltCounter := make(map[string]int)
+
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -178,6 +180,16 @@ func runExecuteMode(shardFile *os.File, outDir string, job commonjobs.Job, R int
 
 		for _, kv := range kvs {
 			key := kv.K
+
+			if plan != nil {
+				if keyStr, ok := key.(string); ok {
+					if info, isHeavy := plan.Heavy[keyStr]; isHeavy {
+						salt := saltCounter[keyStr] % info.Splits
+						saltCounter[keyStr]++
+						key = common.CreateSaltedKey(keyStr, salt)
+					}
+				}
+			}
 
 			partition, err := common.PartitionKey(key, R)
 			if err != nil {

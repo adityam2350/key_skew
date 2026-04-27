@@ -28,11 +28,14 @@ func CanonicalKey(key interface{}) (string, error) {
 		if !ok {
 			return "", fmt.Errorf("invalid salted key: base key must be string, got %T", k[0])
 		}
-		salt, ok := k[1].(float64)
-		if !ok {
+		switch salt := k[1].(type) {
+		case float64:
+			return fmt.Sprintf("%s#%.0f", baseKey, salt), nil
+		case int:
+			return fmt.Sprintf("%s#%d", baseKey, salt), nil
+		default:
 			return "", fmt.Errorf("invalid salted key: salt must be number, got %T", k[1])
 		}
-		return fmt.Sprintf("%s#%.0f", baseKey, salt), nil
 	default:
 		jsonBytes, err := json.Marshal(key)
 		if err != nil {
