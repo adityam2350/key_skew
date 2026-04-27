@@ -25,6 +25,7 @@ func main() {
 	var seed int64
 	var R int
 	var planPath string
+	var combiner bool
 
 	flag.StringVar(&mode, "mode", "execute", "Mode: sample or execute")
 	flag.IntVar(&mapID, "map-id", 0, "Mapper ID")
@@ -35,6 +36,9 @@ func main() {
 	flag.Int64Var(&seed, "seed", 0, "Random seed")
 	flag.IntVar(&R, "R", 8, "Number of reducers (execute mode only)")
 	flag.StringVar(&planPath, "plan", "", "Partition plan path (execute mode only)")
+	// When true, KVs are pre-aggregated in memory per shard before writing partition files,
+	// reducing output volume by the mean term frequency (50-200x for Zipf WordCount).
+	flag.BoolVar(&combiner, "combiner", false, "Pre-aggregate KVs in memory before writing partition files (WordCount only)")
 	flag.Parse()
 
 	if shardPath == "" || outDir == "" || jobName == "" {
@@ -87,7 +91,7 @@ func main() {
 	if mode == "sample" {
 		runSampleMode(shardFile, outDir, job, sampleRate, rand.New(rand.NewSource(seed)))
 	} else {
-		runExecuteMode(shardFile, outDir, job, R, plan)
+		runExecuteMode(shardFile, outDir, job, R, plan, combiner)
 	}
 }
 
@@ -133,8 +137,17 @@ func runSampleMode(shardFile *os.File, outDir string, job commonjobs.Job, sample
 	}
 }
 
-// runExecuteMode runs mapper in execute mode to process records and partition output
-func runExecuteMode(shardFile *os.File, outDir string, job commonjobs.Job, R int, plan *common.PartitionPlan) {
+// combinerEntry holds the canonical key object and accumulated integer value for one
+// distinct (possibly-salted) key within a single shard. Used only when --combiner is set.
+type combinerEntry struct {
+	key interface{}
+	sum int
+}
+
+// runExecuteMode runs mapper in execute mode to process records and partition output.
+// When combiner is true, KVs are accumulated in memory per key before writing, so each
+// unique (possibly-salted) key produces exactly one output record with the summed value.
+func runExecuteMode(shardFile *os.File, outDir string, job commonjobs.Job, R int, plan *common.PartitionPlan, combiner bool) {
 	scanner := bufio.NewScanner(shardFile)
 
 	partFiles := make([]*os.File, R)
@@ -162,6 +175,13 @@ func runExecuteMode(shardFile *os.File, outDir string, job commonjobs.Job, R int
 
 	saltCounter := make(map[string]int)
 
+	// combinerMap maps fmt.Sprintf("%v", key) → combinerEntry so we can accumulate
+	// counts per salted key without writing one line per raw occurrence.
+	var combinerMap map[string]*combinerEntry
+	if combiner {
+		combinerMap = make(map[string]*combinerEntry)
+	}
+
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -176,11 +196,11 @@ func runExecuteMode(shardFile *os.File, outDir string, job commonjobs.Job, R int
 		recordsProcessed++
 
 		kvs := job.Map(record)
-		kvsEmitted += int64(len(kvs))
 
 		for _, kv := range kvs {
 			key := kv.K
 
+			// Round-robin salt for heavy hitters so occurrences spread across splits.
 			if plan != nil {
 				if keyStr, ok := key.(string); ok {
 					if info, isHeavy := plan.Heavy[keyStr]; isHeavy {
@@ -191,17 +211,53 @@ func runExecuteMode(shardFile *os.File, outDir string, job commonjobs.Job, R int
 				}
 			}
 
-			partition, err := common.PartitionKey(key, R)
+			if combiner {
+				// Accumulate under the canonical string; store the key object once.
+				canonicalStr := fmt.Sprintf("%v", key)
+				var vInt int
+				switch v := kv.V.(type) {
+				case int:
+					vInt = v
+				case float64:
+					vInt = int(v)
+				default:
+					vInt = 1
+				}
+				if entry, exists := combinerMap[canonicalStr]; exists {
+					entry.sum += vInt
+				} else {
+					combinerMap[canonicalStr] = &combinerEntry{key: key, sum: vInt}
+				}
+			} else {
+				partition, err := common.PartitionKey(key, R)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: Failed to partition key: %v\n", err)
+					continue
+				}
+				outputKV := common.KV{K: key, V: kv.V}
+				if err := encoders[partition].Encode(outputKV); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: Failed to encode KV: %v\n", err)
+					continue
+				}
+				kvsEmitted++
+			}
+		}
+	}
+
+	// Flush combined KVs: one record per distinct (possibly-salted) key.
+	if combiner {
+		for _, entry := range combinerMap {
+			partition, err := common.PartitionKey(entry.key, R)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: Failed to partition key: %v\n", err)
 				continue
 			}
-
-			outputKV := common.KV{K: key, V: kv.V}
+			outputKV := common.KV{K: entry.key, V: entry.sum}
 			if err := encoders[partition].Encode(outputKV); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: Failed to encode KV: %v\n", err)
 				continue
 			}
+			kvsEmitted++
 		}
 	}
 

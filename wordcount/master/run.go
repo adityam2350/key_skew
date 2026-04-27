@@ -26,6 +26,10 @@ type RunConfig struct {
 	HeavyTopPct     float64
 	FixedSplits     int
 	Seed            int64
+	// Combiner enables mapper-side pre-aggregation (mitigation mode only).
+	// When true, each mapper writes one KV per distinct key instead of one per occurrence,
+	// cutting T_map output volume by the mean term frequency (50-200x for Zipf WordCount).
+	Combiner bool
 }
 
 type RunSummary struct {
@@ -53,6 +57,7 @@ func RunWordCount() {
 	runFlags.Float64Var(&config.HeavyTopPct, "heavy-top-pct", 0.01, "Top percentage for heavy hitters (mitigation only)")
 	runFlags.IntVar(&config.FixedSplits, "fixed-splits", 8, "Fixed number of splits for heavy keys (mitigation only)")
 	runFlags.Int64Var(&config.Seed, "seed", 0, "Global seed")
+	runFlags.BoolVar(&config.Combiner, "combiner", false, "Enable mapper-side combiner (mitigation mode only)")
 	runFlags.Parse(os.Args[2:])
 
 	if err := common.InitLogging(".", "master"); err != nil {
@@ -115,7 +120,7 @@ func runBaseline(config RunConfig, runPath string, summary *RunSummary) {
 	common.LogInfo("MASTER", "Running baseline mode")
 
 	mapStart := time.Now()
-	if err := runMappers(config, runPath, ""); err != nil {
+	if err := runMappers(config, runPath, "", false); err != nil {
 		common.LogError("MASTER", "Map phase failed: %v", err)
 		os.Exit(1)
 	}
@@ -168,7 +173,7 @@ func runMitigation(config RunConfig, runPath string, summary *RunSummary) {
 	summary.HeavyHitters = heavyHitters
 
 	executeStart := time.Now()
-	if err := runMappers(config, runPath, planPath); err != nil {
+	if err := runMappers(config, runPath, planPath, config.Combiner); err != nil {
 		common.LogError("MASTER", "Execute phase failed: %v", err)
 		os.Exit(1)
 	}
@@ -237,9 +242,10 @@ func runMappersSample(config RunConfig, runPath string) error {
 	return nil
 }
 
-// runMappers runs mappers in execute mode
-func runMappers(config RunConfig, runPath string, planPath string) error {
-	common.LogInfo("MASTER", "Running mappers in execute mode")
+// runMappers runs mappers in execute mode. When combiner is true, --combiner is forwarded
+// to each mapper subprocess so it pre-aggregates KVs in memory before writing partition files.
+func runMappers(config RunConfig, runPath string, planPath string, combiner bool) error {
+	common.LogInfo("MASTER", "Running mappers in execute mode (combiner=%v)", combiner)
 
 	semaphore := make(chan struct{}, config.MaxParallelMaps)
 	var wg sync.WaitGroup
@@ -257,6 +263,9 @@ func runMappers(config RunConfig, runPath string, planPath string) error {
 			outDir := filepath.Join(runPath, "intermediate", fmt.Sprintf("map_%d", mapID))
 
 			cmd := commonmaster.BuildMapperCommand("execute", mapID, shardPath, outDir, 0, config.R, planPath, config.Seed, "wordcount")
+			if combiner {
+				cmd.Args = append(cmd.Args, "--combiner")
+			}
 			if err := commonmaster.RunCommand(cmd, filepath.Join(runPath, "logs", fmt.Sprintf("mapper_%d_execute.log", mapID))); err != nil {
 				mu.Lock()
 				errors = append(errors, fmt.Errorf("mapper %d failed: %w", mapID, err))
@@ -387,7 +396,8 @@ func collectMetrics(config RunConfig, runPath string, summary *RunSummary) {
 	summary.ReducerLoad.Records = make([]int64, config.R)
 
 	for r := 0; r < config.R; r++ {
-		statsPath := filepath.Join(runPath, "output", fmt.Sprintf("reduce_%d.stats.json", r))
+		// Reducer writes stats to reduce_N.jsonl.stats.json (the out path with .stats.json appended).
+		statsPath := filepath.Join(runPath, "output", fmt.Sprintf("reduce_%d.jsonl.stats.json", r))
 		file, err := os.Open(statsPath)
 		if err != nil {
 			common.LogWarn("MASTER", "Failed to open reducer stats %d: %v", r, err)
